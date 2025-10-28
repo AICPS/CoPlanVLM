@@ -1,6 +1,6 @@
 # Talking Turtle – LLM‑Powered Navigation Stack
 
-> **Multi‑node ROS 2 workspace for natural‑language control, path‑planning, and autonomous execution on TurtleBot 4**
+> **Multi‑node ROS 2 workspace for natural‑language control, path‑planning, and autonomous execution in Gazebo Ignition Fortress using Turtlebot4**
 
 ## Table of Contents
 
@@ -38,6 +38,7 @@ Everything is written in **Python 3.10+** for quick iteration and leverages sta
 * **OpenAI Integration** – Clean separation between cloud calls (Executive node) and robot runtime; API key handled via environment or parameter.
 * **Grid & Pixel Support** – Path Translator converts grid IDs or pixel coordinates (CSV) to real‑world metres.
 * **ROS 2 Launch Ready** – Each node ships with example launch files; combine the full stack or run modules individually.
+* **Ignition Gazebo Support** – Seamless simulation workflow using Ignition Fortress and official TurtleBot 4 packages.
 * **Extensive Logging** – All non‑user messages are promoted to `WARN` for simpler debugging; otherwise concise `INFO` output.
 
 ---
@@ -68,7 +69,7 @@ Everything is written in **Python 3.10+** for quick iteration and leverages sta
                            world path        │ Float32MultiArray
                                               ▼
                                    ┌────────────────────────┐
-                                   │ CarParkMaster          │
+                                   │ Controller             │
                                    │ • path follower        │
                                    │ • publishes /cmd_vel   │
                                    └────────────────────────┘
@@ -83,10 +84,10 @@ Each block may be launched stand‑alone for unit testing.
 | Node (exec)                                 | Purpose                                                                                  | Key Parameters                             |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------ |
 | **`talking-turtle/basic_LLM_control_node`** | One‑shot language→Twist mapper (demo)                                                    | `openai_api_key`, `temperature` (optional) |
-| **`triage_api_node`**                       | Conversational front‑end; throttles prompts while waiting on the planner                 | `chat_timeout`, `openai_api_key`           |
-| **`executive_api_node`**                    | Sends world snapshot & operator prompt to GPT; returns `/path` list & `/nav/status` JSON | `openai_api_key`                           |
-| **`node_Path_Translator`**                  | Converts grid labels or pixel (u,v) coords to world metres and publishes `/world_path`   | `csv_file`, `pixel_sign_x`, `pixel_sign_y` |
-| **`car_park_master`**                       | Subscribes `/world_path`, drives TurtleBot 4 with `/cmd_vel`                             | `lookahead_dist`, `kp`, `max_speed`        |
+| **`node_Triage_API`**                       | Conversational front‑end; throttles prompts while waiting on the planner                 | `chat_timeout`, `openai_api_key`           |
+| **`node_Executive_API`**                    | Sends world snapshot & operator prompt to GPT; returns `/path` list & `/nav/status` JSON | `openai_api_key`                           |
+| **`node_Path_Translator`**                  | Converts grid labels or pixel (u,v) coords to world metres and publishes `/world_path`   | `csv_file`, `origin_label`, `metres_per_pixel_x`, `metres_per_pixel_y` |
+| **`node_Control`**                       | Subscribes `/world_path`, drives TurtleBot 4 with `/cmd_vel`                             | `lookahead_dist`, `kp`, `max_speed`        |
 
 ---
 
@@ -95,8 +96,8 @@ Each block may be launched stand‑alone for unit testing.
 | Topic         | Type                          | Publisher → Subscriber              |
 | ------------- | ----------------------------- | ----------------------------------- |
 | `/path`       | `std_msgs/String` (JSON list) | ExecutiveApiNode → Path\_Translator |
-| `/world_path` | `std_msgs/Float32MultiArray`  | Path\_Translator → CarParkMaster    |
-| `/cmd_vel`    | `geometry_msgs/Twist`         | CarParkMaster → TurtleBot 4 base    |
+| `/world_path` | `std_msgs/Float32MultiArray`  | Path\_Translator → Control    |
+| `/cmd_vel`    | `geometry_msgs/Twist`         | Control → TurtleBot 4 base    |
 | `/nav/status` | `std_msgs/String` (JSON)      | ExecutiveApiNode → TriageApiNode    |
 | `/openai/log` | `std_msgs/String` (debug)     | *optional*                          |
 
@@ -106,7 +107,7 @@ Each block may be launched stand‑alone for unit testing.
 
 * **Robot** – TurtleBot 4 running ROS 2 Humble (tested) or newer.
 * **Workstation / Dev PC** – Ubuntu 22.04 / Python 3.10+.  (macOS/Windows WSL work too for development.)
-* **ROS 2 Packages** – `rclpy`, `geometry_msgs`, `std_msgs`, `tf_transformations`, `python-csv`.
+* **ROS 2 Packages** – `rclpy`, `geometry_msgs`, `std_msgs`, `tf_transformations`, `python-csv`, `turtlebot4-simulator`, `turtlebot4-description`, `turtlebot4-msgs`, `turtlebot4-navigation`, `turtlebot4-node`.
 * **Python Packages** –
 
   * `openai>=1.15.0`
@@ -116,6 +117,10 @@ Each block may be launched stand‑alone for unit testing.
 ---
 
 ## Workspace Setup
+
+
+Follow the instructions in this [link](https://turtlebot.github.io/turtlebot4-user-manual/software/turtlebot4_simulator.html#installation) for installation of turtlebot4 dependencies and gazebo ignition fortress.
+
 
 ```bash
 # 1. create a ROS 2 overlay workspace (if you don’t have one)
@@ -164,16 +169,29 @@ ros2 param dump /executive_api_node   # after startup
 
 ## Running the Stack
 
-### 1. Full‑stack Launch (recommended)
+### 1. Launch the Ignition Gazebo with turtlebot4
+
+Open two terminals and launch ignition gazebo using the following command in one terminal.
 
 ```bash
-ros2 launch talking-turtle full_stack.launch.py \
-  openai_api_key:=$OPENAI_API_KEY
+ros2 launch talking-turtle turtlebot4_ignition.launch.py 
 ```
 
-This launch file starts **Triage → Executive → Translator → Follower** and binds a CLI prompt for the operator.
+This launch file starts **Ignition Gazebo with the custom world and Turtlebot4 at given spawn location**.
 
-### 2. Individual Nodes
+
+
+### 2. Launch the VLM node
+
+In the other terminal run the following command to run the VLM node for guidance and control of the turtlebot.
+
+```bash
+ros2 launch talking-turtle talking-turtle.launch.py openai_api_key:=$OPENAI_API_KEY
+```
+
+This launch file starts **Triage → Executive → Translator → Controller** and binds a CLI prompt for the operator.
+
+### 3. Individual Nodes (Optional)
 
 Run any module on its own for unit tests, e.g.:
 
@@ -206,3 +224,4 @@ ros2 run talking-turtle node_Path_Translator \
 ## License
 
 Distributed under the Apache 2.0 License (see `LICENSE`).
+
