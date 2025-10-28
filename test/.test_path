@@ -1,0 +1,2 @@
+ros2 topic pub --once /path std_msgs/msg/String "data: '[\"L4\", \"L3\", \"K3\", \"J2\", \"I2\", \"H2\", \"G2\", \"F3\"]'"
+ros2 topic pub --once /path std_msgs/msg/String "data: '[\"F3\"]'"

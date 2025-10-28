@@ -1,0 +1,5 @@
+rclpy
+python-dotenv
+openai
+pyaudio
+transforms3d>=0.4.2

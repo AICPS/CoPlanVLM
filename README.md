@@ -1,93 +1,208 @@
-# VLM_SITL
+# Talking Turtle – LLM‑Powered Navigation Stack
 
+> **Multi‑node ROS 2 workspace for natural‑language control, path‑planning, and autonomous execution on TurtleBot 4**
 
+## Table of Contents
 
-## Getting started
+1. [Introduction](#introduction)
+2. [Features](#features)
+3. [Project Architecture](#project-architecture)
+4. [Node Reference](#node-reference)
+5. [Topics & Interfaces](#topics--interfaces)
+6. [Prerequisites](#prerequisites)
+7. [Workspace Setup](#workspace-setup)
+8. [Configuration](#configuration)
+9. [Running the Stack](#running-the-stack)
+10. [Testing & Debugging](#testing--debugging)
+11. [Development Guidelines](#development-guidelines)
+12. [License](#license)
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+---
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Introduction
 
-## Add your files
+Talking Turtle turns high‑level human instructions into safe, interpretable robot motion.  The stack couples OpenAI GPT models with ROS 2 Humble nodes to:
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+* parse natural‑language commands,
+* plan collision‑free world‑frame paths, and
+* drive a TurtleBot 4 along those paths under velocity control.
+
+Everything is written in **Python 3.10+** for quick iteration and leverages standard ROS 2 patterns (publish/subscribe, parameters, launch files).
+
+---
+
+## Features
+
+* **Natural‑Language Interface → Motion** – Speak or type intents such as “Park between rows three and four” and receive `/cmd_vel` messages.
+* **Modular Nodes** – Separate nodes for language understanding, path translation, execution monitoring, and low‑level following.
+* **OpenAI Integration** – Clean separation between cloud calls (Executive node) and robot runtime; API key handled via environment or parameter.
+* **Grid & Pixel Support** – Path Translator converts grid IDs or pixel coordinates (CSV) to real‑world metres.
+* **ROS 2 Launch Ready** – Each node ships with example launch files; combine the full stack or run modules individually.
+* **Extensive Logging** – All non‑user messages are promoted to `WARN` for simpler debugging; otherwise concise `INFO` output.
+
+---
+
+## Project Architecture
 
 ```
-cd existing_repo
-git remote add origin https://10.251.72.180/sandip/vlm_sitl.git
-git branch -M main
-git push -uf origin main
+[User / CLI / Voice]
+        │ natural‑language            ┌───────────────────────┐
+        ▼                            │  TriageApiNode        │
+┌─────────────────┐  prompt + chat   │  • gate conversation  │
+│ TriageApiNode   ├─────────────────►│  • forward prompts   │
+└─────────────────┘                  └─────────┬────────────┘
+                                              │ prompt JSON
+                                              ▼
+                                   ┌────────────────────────┐
+                                   │ ExecutiveApiNode       │
+                                   │ • OpenAI call (o4‑mini)│
+                                   │ • publishes /path      │
+                                   │   & /nav/status        │
+                                   └─────────┬──────────────┘
+                           world path        │ Float32MultiArray
+                                              ▼
+                                   ┌────────────────────────┐
+                                   │ Path_Translator        │
+                                   │ • grid→world metres    │
+                                   └─────────┬──────────────┘
+                           world path        │ Float32MultiArray
+                                              ▼
+                                   ┌────────────────────────┐
+                                   │ CarParkMaster          │
+                                   │ • path follower        │
+                                   │ • publishes /cmd_vel   │
+                                   └────────────────────────┘
 ```
 
-## Integrate with your tools
+Each block may be launched stand‑alone for unit testing.
 
-- [ ] [Set up project integrations](https://10.251.72.180/sandip/vlm_sitl/-/settings/integrations)
+---
 
-## Collaborate with your team
+## Node Reference
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+| Node (exec)                                 | Purpose                                                                                  | Key Parameters                             |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------ |
+| **`talking-turtle/basic_LLM_control_node`** | One‑shot language→Twist mapper (demo)                                                    | `openai_api_key`, `temperature` (optional) |
+| **`triage_api_node`**                       | Conversational front‑end; throttles prompts while waiting on the planner                 | `chat_timeout`, `openai_api_key`           |
+| **`executive_api_node`**                    | Sends world snapshot & operator prompt to GPT; returns `/path` list & `/nav/status` JSON | `openai_api_key`                           |
+| **`node_Path_Translator`**                  | Converts grid labels or pixel (u,v) coords to world metres and publishes `/world_path`   | `csv_file`, `pixel_sign_x`, `pixel_sign_y` |
+| **`car_park_master`**                       | Subscribes `/world_path`, drives TurtleBot 4 with `/cmd_vel`                             | `lookahead_dist`, `kp`, `max_speed`        |
 
-## Test and Deploy
+---
 
-Use the built-in continuous integration in GitLab.
+## Topics & Interfaces
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+| Topic         | Type                          | Publisher → Subscriber              |
+| ------------- | ----------------------------- | ----------------------------------- |
+| `/path`       | `std_msgs/String` (JSON list) | ExecutiveApiNode → Path\_Translator |
+| `/world_path` | `std_msgs/Float32MultiArray`  | Path\_Translator → CarParkMaster    |
+| `/cmd_vel`    | `geometry_msgs/Twist`         | CarParkMaster → TurtleBot 4 base    |
+| `/nav/status` | `std_msgs/String` (JSON)      | ExecutiveApiNode → TriageApiNode    |
+| `/openai/log` | `std_msgs/String` (debug)     | *optional*                          |
 
-***
+---
 
-# Editing this README
+## Prerequisites
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+* **Robot** – TurtleBot 4 running ROS 2 Humble (tested) or newer.
+* **Workstation / Dev PC** – Ubuntu 22.04 / Python 3.10+.  (macOS/Windows WSL work too for development.)
+* **ROS 2 Packages** – `rclpy`, `geometry_msgs`, `std_msgs`, `tf_transformations`, `python-csv`.
+* **Python Packages** –
 
-## Suggestions for a good README
+  * `openai>=1.15.0`
+  * `python-dotenv` *(optional)*
+  * `numpy`, `pandas` (only for tooling, not runtime)
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+---
 
-## Name
-Choose a self-explaining name for your project.
+## Workspace Setup
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+# 1. create a ROS 2 overlay workspace (if you don’t have one)
+mkdir -p ~/ros2_ws/src && cd ~/ros2_ws
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+# 2. clone the repo
+git clone <your-repo-url> src/talking-turtle
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+# 3. install Python deps
+python3 -m pip install -r src/talking-turtle/requirements.txt
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+# 4. resolve ROS 2 deps & build
+rosdep update
+rosdep install --from-paths src --ignore-src -y
+colcon build --symlink-install
+source install/setup.bash
+```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+> **Tip:** add the `source install/setup.bash` line to your `~/.bashrc` for convenience.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+---
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+## Configuration
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+### OpenAI Credentials
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+The stack requires an **OpenAI API key**.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+```bash
+export OPENAI_API_KEY="sk-..."   # shell
+```
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+Alternatively supply `-p openai_api_key:=...` to individual nodes.
+
+You may also store keys in a `.env` file when using `python-dotenv`.
+
+### Launch Parameters
+
+All nodes expose ROS 2 parameters.  See `launch/` directory or run:
+
+```bash
+ros2 param dump /executive_api_node   # after startup
+```
+
+---
+
+## Running the Stack
+
+### 1. Full‑stack Launch (recommended)
+
+```bash
+ros2 launch talking-turtle full_stack.launch.py \
+  openai_api_key:=$OPENAI_API_KEY
+```
+
+This launch file starts **Triage → Executive → Translator → Follower** and binds a CLI prompt for the operator.
+
+### 2. Individual Nodes
+
+Run any module on its own for unit tests, e.g.:
+
+```bash
+ros2 run talking-turtle node_Path_Translator \
+  --ros-args -p csv_file:=maps/grid_lookup.csv -p pixel_sign_x:=-1 -p pixel_sign_y:=1
+```
+
+---
+
+## Testing & Debugging
+
+* **ROS 2 CLI** – `ros2 topic echo /world_path` to verify translation.
+* **rqt\_console / rqt\_graph** – inspect logs and topic flow.
+* **Simulation** – Use Gazebo‑classic or Ignition with TurtleBot 4 model to test without hardware.
+* **Unit Tests** – See `tests/` for pytest cases.
+
+---
+
+## Development Guidelines
+
+1. **Keep nodes single‑responsibility.**
+2. **No secrets in code.**  Use env vars or ROS 2 parameters.
+3. **No blocking calls in callbacks.**  Use threads or `rclpy.executors.MultiThreadedExecutor` where required.
+4. **Write doc‑strings** and keep this README in sync with code changes.
+5. **Run `ruff` & `black`.**  Lint before pushing.
+
+---
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Distributed under the Apache 2.0 License (see `LICENSE`).
