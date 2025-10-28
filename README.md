@@ -47,27 +47,27 @@ Everything is written in **Python 3.10+** for quick iteration and leverages sta
 
 ```
 [User / CLI / Voice]
-        │ natural‑language            ┌───────────────────────┐
+        │ natural‑language           ┌───────────────────────┐
         ▼                            │  TriageApiNode        │
 ┌─────────────────┐  prompt + chat   │  • gate conversation  │
-│ TriageApiNode   ├─────────────────►│  • forward prompts   │
-└─────────────────┘                  └─────────┬────────────┘
-                                              │ prompt JSON
-                                              ▼
+│ TriageApiNode   ├─────────────────►│  • forward prompts    │
+└─────────────────┘                  └───────────────────────┘
+                                               │ prompt JSON
+                                               ▼
                                    ┌────────────────────────┐
                                    │ ExecutiveApiNode       │
                                    │ • OpenAI call (o4‑mini)│
                                    │ • publishes /path      │
                                    │   & /nav/status        │
                                    └─────────┬──────────────┘
-                           world path        │ Float32MultiArray
-                                              ▼
+                                 world path  │ Float32MultiArray
+                                             ▼
                                    ┌────────────────────────┐
                                    │ Path_Translator        │
                                    │ • grid→world metres    │
                                    └─────────┬──────────────┘
-                           world path        │ Float32MultiArray
-                                              ▼
+                                world path   │ Float32MultiArray
+                                             ▼
                                    ┌────────────────────────┐
                                    │ Controller             │
                                    │ • path follower        │
