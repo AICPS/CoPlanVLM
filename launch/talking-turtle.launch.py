@@ -142,6 +142,31 @@ def generate_launch_description():
         ),
     ])
 
+    # Path visualizer node
+    path_visualizer_node = Node(
+        package='talking-turtle',
+        executable='node_Path_Visualizer',
+        name='node_Path_Visualizer',
+        output='screen',
+        emulate_tty=True,
+        parameters=[
+            {'grid_csv': grid_csv_path},
+            {'map_path': pkg_dir + '/map_raw.png'},
+            {'save_overlays': True},
+            {'line_thickness': 8},
+            {'circle_radius': 16},
+            {'world_path_color': [200, 200, 200]},  # Light gray for reference path
+            {'robot_color': [255, 0, 255]},  # Magenta for robot
+            {'world_origin_x': 0.0},
+            {'world_origin_y': 5.5},
+            {'metres_per_pixel_x': 1.0 / 138.0},
+            {'metres_per_pixel_y': -1.0 / 152.0},
+        ],
+        remappings=[
+            ('/raw_map', '/ids_overhead/image'),
+            ('/raph/sim_ground_truth_pose', '/' + bot_name + '/sim_ground_truth_pose'),
+        ],
+    )
 
     return LaunchDescription([
         exec_api_node,
@@ -153,5 +178,6 @@ def generate_launch_description():
         listener_node,
         joy_node,
         mapper_node,
+        path_visualizer_node,
         # logger_node,
     ])

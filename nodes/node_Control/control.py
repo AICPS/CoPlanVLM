@@ -138,7 +138,7 @@ class ControlNode(Node):
         # Checks if in proximity to target.
         # if self.command.linear.x < 0.02 and self.command.linear.y < 0.02:
         #     self.parked = True
-        if error_distance < 0.25:
+        if error_distance < 0.1:
             self.parked = True
 
     # def publish_velocity(self):
