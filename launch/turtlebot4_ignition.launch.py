@@ -37,8 +37,10 @@ ARGUMENTS = [
 ]
 
 pose_defaults = {
-    'x': '-1.5',
-    'y': '-3.5',
+    'x': '-1.75',
+    'y': '-3.25', # adjusted to match old warehouse layout
+    # 'x': '-1.5',
+    # 'y': '-0.5',   # adjusted to match new house layout
     'z': '0.25',
     'yaw': '0.0',
 }

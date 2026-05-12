@@ -1,3 +1,4 @@
+<?xml version="1.0"?>
 <sdf version='1.9'>
   <world name='warehouse'>
     <physics type='ode'>
@@ -89,7 +90,7 @@
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/foldable_chair</uri>
       <name>fchair_0</name>
-      <pose>10.50 2.5 0 0 0 -1.57</pose>
+      <pose>10.50 2.25 0 0 0 -1.57</pose>
       <scale>3 3 3</scale>
     </include>
     <include>
@@ -195,9 +196,9 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.3 0.3 0.3 1</ambient>
-            <diffuse>0.7 0.7 0.7 1</diffuse>
-            <specular>1 1 1 1</specular>
+            <ambient>0.90 0.20 0.20 1</ambient>
+            <diffuse>0.90 0.20 0.20 1</diffuse>
+            <specular>0.20 0.20 0.20 1</specular>
           </material>
         </visual>
         <pose>0 0 0 0 -0 0</pose>
@@ -242,9 +243,9 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.3 0.3 0.3 1</ambient>
-            <diffuse>0.7 0.7 0.7 1</diffuse>
-            <specular>1 1 1 1</specular>
+            <ambient>0.15 0.55 0.95 1</ambient>
+            <diffuse>0.15 0.55 0.95 1</diffuse>
+            <specular>0.20 0.20 0.20 1</specular>
           </material>
         </visual>
         <pose>0 0 0 0 -0 0</pose>
@@ -254,7 +255,7 @@
       <self_collide>false</self_collide>
     </model>
     <model name='box_3'>
-      <pose>2.46997 -2.06423 0.5 0 -0 0</pose>
+      <pose>2.46997 -2.5 0.5 0 -0 0</pose>
       <link name='box_3_link'>
         <inertial>
           <inertia>
@@ -289,9 +290,9 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.3 0.3 0.3 1</ambient>
-            <diffuse>0.7 0.7 0.7 1</diffuse>
-            <specular>1 1 1 1</specular>
+            <ambient>0.20 0.75 0.25 1</ambient>
+            <diffuse>0.20 0.75 0.25 1</diffuse>
+            <specular>0.20 0.20 0.20 1</specular>
           </material>
         </visual>
         <pose>0 0 0 0 -0 0</pose>
@@ -336,9 +337,9 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.3 0.3 0.3 1</ambient>
-            <diffuse>0.7 0.7 0.7 1</diffuse>
-            <specular>1 1 1 1</specular>
+            <ambient>0.95 0.80 0.15 1</ambient>
+            <diffuse>0.95 0.80 0.15 1</diffuse>
+            <specular>0.20 0.20 0.20 1</specular>
           </material>
         </visual>
         <pose>0 0 0 0 -0 0</pose>

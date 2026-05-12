@@ -32,8 +32,8 @@ class ControlNode(Node):
         self.goal_yaw = None
 
         # kP constant value.
-        self.kP_val = 0.50
-        self.kP_pos = 0.90
+        self.kP_val = 0.5
+        self.kP_pos = 0.75
 
         # Holds the error between the current pose & goal pose readings
         self.pose_error = None
@@ -138,7 +138,7 @@ class ControlNode(Node):
         # Checks if in proximity to target.
         # if self.command.linear.x < 0.02 and self.command.linear.y < 0.02:
         #     self.parked = True
-        if error_distance < 0.1:
+        if error_distance < 0.25:
             self.parked = True
 
     # def publish_velocity(self):

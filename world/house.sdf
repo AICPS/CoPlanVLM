@@ -140,7 +140,7 @@
     <!-- Camera: height 7.5 → 5.0 -->
     <model name="ids_camera">
       <!-- moved slightly higher to increase top/bottom coverage -->
-      <pose>0 0 10.0 0 1.5708 1.5708</pose>
+      <pose>0 0 10 0 1.5708 1.5708</pose>
       <static>true</static>
       <link name="camera_link">
         <visual name="camera_body_visual">
@@ -175,8 +175,7 @@
           <pose>0 0 0 0 0 0</pose>
           <topic>/ids_overhead/image</topic>
           <camera name='overhead_cam'>
-            <!-- slightly wider FOV so vertical coverage increases a bit -->
-            <horizontal_fov>1.10</horizontal_fov>
+            <horizontal_fov>1.3962634</horizontal_fov>
             <image>
               <width>1936</width>
               <height>1216</height>
@@ -283,7 +282,7 @@
     </model>
     <model name="TVStand">
       <static>true</static>
-      <pose>-2.25 3.23 0.02 0 0 0</pose>
+      <pose>-2.25 4.25 0.02 0 0 0</pose>
       <link name="body">
         <pose>0 0 0 0 0 0</pose>
         <visual name="visual">
@@ -305,7 +304,7 @@
       </link>
     </model>
     <model name="tv_65in_emissive">
-      <pose>-2.25 3.23 0.38 0 0 1.57</pose>
+      <pose>-2.25 4.25 0.38 0 0 1.57</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
@@ -519,7 +518,7 @@
     <!-- Kitchen furniture -->
     <model name="Fridge">
       <static>true</static>
-      <pose>3.75 3.26 0.02 0 0 0</pose>
+      <pose>3.75 4.25 0.02 0 0 0</pose>
       <link name="body">
         <pose>0 0 0 0 0 0</pose>
         <visual name="visual">
