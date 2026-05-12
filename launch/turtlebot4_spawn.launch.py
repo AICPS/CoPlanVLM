@@ -82,7 +82,7 @@ def generate_launch_description():
     robot_name = GetNamespacedName(namespace, 'turtlebot4')
 
     # Spawn robot slightly closer to the floor to reduce the drop
-    z_robot = OffsetParser(z, -0.0025)
+    z_robot = OffsetParser(z, 0.0)
 
     spawn_robot_group_action = GroupAction([
         PushRosNamespace(namespace),
@@ -106,7 +106,6 @@ def generate_launch_description():
                        '-topic', 'robot_description'],
             output='screen'
         ),
-
 
         # ROS IGN bridge
         IncludeLaunchDescription(

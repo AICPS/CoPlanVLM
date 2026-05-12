@@ -83,12 +83,14 @@
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Chair</uri>
       <name>chair_1</name>
-      <pose>0.5 0.4779 0 0 0 -3.11455</pose>
+      <pose>0.5 0.4779 0 0 0 0</pose>
+      <scale>5 5 5</scale>
     </include>
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/foldable_chair</uri>
       <name>fchair_0</name>
-      <pose>4.383 -0.30556 0 0 0 -1.8</pose>
+      <pose>10.50 2.5 0 0 0 -1.57</pose>
+      <scale>3 3 3</scale>
     </include>
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Table</uri>
@@ -98,10 +100,17 @@
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/MaleVisitorOnPhone</uri>
       <name>Person 1 - Standing</name>
-      <pose>4.96069 1.49374 0 0 0 -3.07681</pose>
+      <pose>10.0 2.5 0 0 0 -3.07681</pose>
+    </include>
+    <include>
+      <uri>
+      https://fuel.gazebosim.org/1.0/OpenRobotics/models/Walking%20person
+      </uri>
+      <name>Person 2 - Walking</name>
+      <pose>5.5 -3.5 0 0 0 1.57</pose>
     </include>
     <model name="ids_camera">
-      <pose>0 0 9.5 0 1.5708 1.5708</pose>
+      <pose>5.5 0 9.5 0 1.5708 1.5708</pose>
       <static>true</static>
       <link name="camera_link">
         <visual name="camera_body_visual">
@@ -151,7 +160,7 @@
       </link>
     </model>
     <model name='box_1'>
-      <pose>3.18416 1.91366 0.5 0 -0 0</pose>
+      <pose>5.18416 1.91366 0.5 0 -0 0</pose>
       <link name='box_1_link'>
         <inertial>
           <inertia>
@@ -198,7 +207,7 @@
       <self_collide>false</self_collide>
     </model>
     <model name='box_2'>
-      <pose>-1.355537 1.76872 0.5 0 -0 0</pose>
+      <pose>4.355537 1.76872 0.5 0 -0 0</pose>
       <link name='box_2_link'>
         <inertial>
           <inertia>
@@ -245,7 +254,7 @@
       <self_collide>false</self_collide>
     </model>
     <model name='box_3'>
-      <pose>-1.46997 -2.06423 0.5 0 -0 0</pose>
+      <pose>2.46997 -2.06423 0.5 0 -0 0</pose>
       <link name='box_3_link'>
         <inertial>
           <inertia>
@@ -292,7 +301,7 @@
       <self_collide>false</self_collide>
     </model>
     <model name='box_4'>
-      <pose>2.14108 -1.61996 0.5 0 -0 0</pose>
+      <pose>7.14108 -1.61996 0.5 0 -0 0</pose>
       <link name='box_4_link'>
         <inertial>
           <inertia>

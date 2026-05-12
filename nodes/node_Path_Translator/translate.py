@@ -73,7 +73,7 @@ class SimplePathTranslator(Node):
 
         self.declare_parameter("origin_label", "H5")
         self.declare_parameter("world_origin_x", 0.0)
-        self.declare_parameter("world_origin_y", 0.0)
+        self.declare_parameter("world_origin_y", 5.5)
         self.declare_parameter("metres_per_pixel_x", 1.0 / 138.0)   # horizontal scale
         self.declare_parameter("metres_per_pixel_y", -1.0 / 152.0)  # vertical scale (inverted)
 

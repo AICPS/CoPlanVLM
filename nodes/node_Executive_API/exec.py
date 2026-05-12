@@ -87,14 +87,18 @@ class ExecutiveApiNode(Node):
             self.map = self._encode_image(self.map_path)
 
             response = self.client.responses.create(
-                # prompt={
-                #     "id": "pmpt_685963df1d0081958a7bbfdd74bdae590a18ad364ec2d535",
-                #     "version": "3"
-                # },
                 prompt={
-                    "id": "pmpt_68d6bfb538708195a919d8d93d58e9b20c3d5460618192f7",
-                    "version": "4"
+                    "id": "pmpt_685963df1d0081958a7bbfdd74bdae590a18ad364ec2d535",
+                    "version": "5"
                 },
+                # prompt={
+                #     "id": "pmpt_68d6bfb538708195a919d8d93d58e9b20c3d5460618192f7",
+                #     "version": "11"
+                # },
+                # prompt={
+                #     "id": "pmpt_6a0261312ee881939341b343263b23280651a298466c79a0",
+                #     "version": "4"
+                # },
                 # model="gpt-5"
                 input=[
                     {
@@ -103,7 +107,7 @@ class ExecutiveApiNode(Node):
                             { "type": "input_text", "text": self.prompt },
                             {
                                 "type": "input_image",
-                                "image_url": f"data:image/jpeg;base64,{self.map}",
+                                "image_url": f"data:image/png;base64,{self.map}",
                             },
                         ],
                     }

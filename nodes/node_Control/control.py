@@ -32,8 +32,8 @@ class ControlNode(Node):
         self.goal_yaw = None
 
         # kP constant value.
-        self.kP_val = 0.01
-        self.kP_pos = 0.2
+        self.kP_val = 0.50
+        self.kP_pos = 0.90
 
         # Holds the error between the current pose & goal pose readings
         self.pose_error = None
@@ -129,15 +129,38 @@ class ControlNode(Node):
 
         # Calculate and initiate forward movement of the robot.
         car = self.pose_error.pose.position
-
-        self.command.linear.x = self.kP_pos * math.sqrt(car.x ** 2 + car.y ** 2)
+        error_distance = math.sqrt(car.x ** 2 + car.y ** 2)
+        self.command.linear.x = self.kP_pos * error_distance
 
         # Publish the updated velocity command values to the bot
         self.velocity_publisher.publish(self.command)
 
         # Checks if in proximity to target.
-        if self.command.linear.x < 0.02 and self.command.linear.y < 0.02:
+        # if self.command.linear.x < 0.02 and self.command.linear.y < 0.02:
+        #     self.parked = True
+        if error_distance < 0.1:
             self.parked = True
+
+    # def publish_velocity(self):
+    #     # Keep yaw error in radians
+    #     yaw_error = self.yaw_error
+        
+    #     # Wrap to [-pi, pi]
+    #     while yaw_error > math.pi:
+    #         yaw_error -= 2 * math.pi
+    #     while yaw_error < -math.pi:
+    #         yaw_error += 2 * math.pi
+
+    #     self.command.angular.z = self.kP_val * yaw_error
+
+    #     car = self.pose_error.pose.position
+    #     distance = math.sqrt(car.x ** 2 + car.y ** 2)
+    #     self.command.linear.x = self.kP_pos * distance
+
+    #     self.velocity_publisher.publish(self.command)
+
+    #     if distance < 0.1:
+    #         self.parked = True
 
 
 def main(args=None):

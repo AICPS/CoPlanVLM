@@ -224,4 +224,3 @@ ros2 run talking-turtle node_Path_Translator \
 ## License
 
 Distributed under the Apache 2.0 License (see `LICENSE`).
-

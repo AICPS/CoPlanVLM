@@ -1,7 +1,17 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'talking-turtle'
 node_path = 'talking-turtle.nodes.'
+
+def get_data_files(source_dir, dest_prefix):
+    data_files = []
+    for root, dirs, files in os.walk(source_dir):
+        if files:
+            dest = os.path.join(dest_prefix, os.path.relpath(root, os.path.dirname(source_dir)))
+            data_files.append((dest, [os.path.join(root, f) for f in files]))
+    return data_files
 
 setup(
     name=package_name,
@@ -13,10 +23,12 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config/', ['config/.env', 'config/grid_cell_centers.csv', 'config/transparent_grid.png']),
-        (f'share/{package_name}/launch', ['launch/talking-turtle.launch.py', 'launch/turtlebot4_ignition.launch.py', 'launch/turtlebot4_spawn.launch.py', 'launch/ignition.launch.py']),
-        (f'share/{package_name}/world', ['world/sim_world.sdf']),
+        (f'share/{package_name}/launch', glob('launch/*.py')),
+        (f'share/{package_name}/world', ['world/house.sdf', 'world/sim_world.sdf']),
+        (f'share/{package_name}/world/materials/script', glob('world/materials/script/*')),
+        (f'share/{package_name}/world/materials/textures', glob('world/materials/textures/*')),
+    ] + get_data_files('world/meshes', f'share/{package_name}/world'),
 
-    ],
     install_requires=['setuptools', 'openai', 'python-dotenv', 'ament_index_python', 'pyaudio', 'rclpy', 'keyboard'],
     zip_safe=True,
     maintainer='Caleb Craddock',
