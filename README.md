@@ -199,6 +199,11 @@ This starts **Triage → Executive → Translator → Controller** and binds the
 
 Hold `A` to talk, then release it when you are done speaking.
 
+Alternatively, to send a text command from the terminal:
+```bash
+ros2 topic pub --once /user_text std_msgs/msg/String "{data: 'Find the green block and drive to it'}"
+```
+
 ### 5. Recovery steps
 
 If you run into an image-type issue or the controller is already stuck from a previous run, restart the computer to clear the existing processes and try again.
