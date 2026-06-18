@@ -1,0 +1,23 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+*.egg-info/
+build/
+dist/
+
+# colcon build artifacts (if the workspace root is ever inside the repo)
+install/
+log/
+
+# Secrets — do NOT commit API keys
+config/.env
+.env
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
