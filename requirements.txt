@@ -3,3 +3,10 @@ python-dotenv
 openai
 pyaudio
 transforms3d>=0.4.2
+
+# CLIPSeg traversability segmentation (obs_seg)
+torch
+torchvision
+transformers
+opencv-python
+numpy
