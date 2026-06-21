@@ -130,15 +130,22 @@ class ControlNode(Node):
         # Calculate and initiate forward movement of the robot.
         car = self.pose_error.pose.position
         error_distance = math.sqrt(car.x ** 2 + car.y ** 2)
-        self.command.linear.x = self.kP_pos * error_distance
+
+        # Heading gate: only drive forward when roughly facing the goal. If the heading
+        # error exceeds 60°, command zero linear velocity and just rotate toward the goal
+        # (prevents wide arcs that cut corners / clip obstacles). yaw_error is wrapped to
+        # [-pi, pi] so the comparison reflects the true signed heading error.
+        wrapped_yaw_err = math.atan2(math.sin(self.yaw_error), math.cos(self.yaw_error))
+        if abs(wrapped_yaw_err) > math.radians(60):
+            self.command.linear.x = 0.0
+        else:
+            self.command.linear.x = self.kP_pos * error_distance
 
         # Publish the updated velocity command values to the bot
         self.velocity_publisher.publish(self.command)
 
-        # Checks if in proximity to target.
-        # if self.command.linear.x < 0.02 and self.command.linear.y < 0.02:
-        #     self.parked = True
-        if error_distance < 0.1:
+        # Checks if in proximity to target (capture radius).
+        if error_distance < 0.15:
             self.parked = True
 
     # def publish_velocity(self):

@@ -95,7 +95,7 @@ class SimplePathTranslator(Node):
         self.declare_parameter("untraversable_prompts", [""])   # "" entries filtered out
         self.declare_parameter("threshold", 0.45)
         self.declare_parameter("resolution", 0.05)              # m / occupancy cell
-        self.declare_parameter("inflation_radius", 0.25)        # m (TurtleBot4 radius ~0.17)
+        self.declare_parameter("inflation_radius", 0.4)         # m (TurtleBot4 radius ~0.17 + margin)
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
 
@@ -362,7 +362,28 @@ class SimplePathTranslator(Node):
             return out
         cv2.imwrite(os.path.join(d, "occ_true.png"), viz(grid))
         cv2.imwrite(os.path.join(d, "occ_inflated.png"), viz(infl))
-        self.get_logger().info(f"Saved 6 debug artifacts to {d}")
+
+        # Inflated obstacles overlaid on the overhead image (pixel space) — shows how far the
+        # inflation overshoots the true obstacles. Each image pixel is mapped to its occupancy
+        # cell: red = true obstacle, yellow = inflation margin (inflated-occupied but not a
+        # true obstacle). Pixel-space, so it lines up with the overhead image directly.
+        h_img, w_img = base.shape[:2]
+        uu, vv = np.meshgrid(np.arange(w_img), np.arange(h_img))
+        xs, ys = pixel_to_world(uu, vv, self.x0, self.y0, self.sx, self.sy, self.u0, self.v0)
+        gx = np.floor((xs - meta["origin_x"]) / meta["resolution"]).astype(np.int64)
+        gy = np.floor((ys - meta["origin_y"]) / meta["resolution"]).astype(np.int64)
+        inb = (gx >= 0) & (gx < meta["width"]) & (gy >= 0) & (gy < meta["height"])
+        gxc = np.clip(gx, 0, meta["width"] - 1)
+        gyc = np.clip(gy, 0, meta["height"] - 1)
+        true_occ = inb & (grid[gyc, gxc] != FREE)      # actual obstacle / unknown
+        infl_occ = inb & (infl[gyc, gxc] == OCCUPIED)
+        margin = infl_occ & ~true_occ                  # cells added purely by inflation
+        infl_overlay = base.copy()
+        infl_overlay[margin] = (0.5 * base[margin] + 0.5 * np.array([0, 220, 220])).astype(np.uint8)    # yellow
+        infl_overlay[true_occ] = (0.5 * base[true_occ] + 0.5 * np.array([0, 0, 220])).astype(np.uint8)  # red
+        cv2.imwrite(os.path.join(d, "inflation_overlay.png"), infl_overlay)
+
+        self.get_logger().info(f"Saved 8 debug artifacts to {d}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

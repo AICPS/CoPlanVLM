@@ -16,7 +16,7 @@ Choose the action:
 - "reply": the message is small talk, a question, a clarification, or anything that does NOT
   require the robot to physically navigate or perform a task. Answer conversationally.
 - "exec": the operator wants the robot to go somewhere or carry out a navigation task
-  (e.g. "go to the kitchen", "drive to the person in the red shirt", "park between the
+  (e.g. "go to the nearest box", "drive to the person in the red shirt", "park between the
   shelves"). Forward a clean instruction to the path planner.
 
 Output format — respond with EXACTLY one JSON object, no markdown, no text outside the JSON:
