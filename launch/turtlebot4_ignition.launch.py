@@ -17,7 +17,9 @@
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, SetEnvironmentVariable,
+                            IncludeLaunchDescription, RegisterEventHandler, ExecuteProcess)
+from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 
@@ -110,10 +112,21 @@ def generate_launch_description():
         output='screen'
     )
 
+    # On shutdown, force-kill lingering Ignition Gazebo + spawn processes so the next
+    # launch starts from a clean world (Ignition v6 often orphans its server on Ctrl-C).
+    # Graceful SIGINT first, then SIGKILL any stragglers.
+    cleanup = ExecuteProcess(
+        cmd=['bash', '-c',
+             'pkill -INT -f "ign gazebo"; sleep 2; '
+             'pkill -9 -f "ign gazebo"; pkill -9 -f "ros_gz_sim/create"'],
+        output='screen',
+    )
+
     # Create launch description and add actions
     ld = LaunchDescription(ARGUMENTS)
     ld.add_action(ign_gazebo_resource_path)
     ld.add_action(ignition)
     ld.add_action(robot_spawn)
     ld.add_action(gz_bridge_node)
+    ld.add_action(RegisterEventHandler(OnShutdown(on_shutdown=[cleanup])))
     return ld

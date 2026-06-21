@@ -58,7 +58,7 @@ from ament_index_python.packages import get_package_share_directory
 import yaml
 
 from coord_transform import pixel_to_world, world_to_pixel
-from obs_seg import FREE, OCCUPIED
+from obs_seg import FREE, OCCUPIED, UNKNOWN
 from obs_seg.segmenter import TraversabilitySegmenter
 from obs_seg.occupancy import (mask_to_occupancy, inflate_occupancy,
                                world_to_cell, cell_to_world)
@@ -296,16 +296,26 @@ class SimplePathTranslator(Node):
 
         if self.save_debug and self.debug_dir and self.latest_rgb is not None:
             try:
-                self._save_debug(sel_pixels, full_cells, grid, infl, meta)
+                self._save_debug(pix_labels, sel_pixels, full_cells, grid, infl, meta)
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().warn(f"Debug save failed: {exc}")
 
     # ------------------------------------------------------------------
-    def _save_debug(self, sel_pixels, full_cells, grid, infl, meta) -> None:
-        """Write the six debug artifacts to self.debug_dir (overwrite in place)."""
+    def _save_debug(self, pix_labels, sel_pixels, full_cells, grid, infl, meta) -> None:
+        """Write the debug artifacts to self.debug_dir (overwrite in place)."""
         d = self.debug_dir
         base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(d, "raw_overhead.png"), base)
+
+        # CLIPSeg segmentation result, as a colored overlay on the overhead frame.
+        # pix_labels is the same shape as the image, so this is already in camera
+        # orientation (no transpose needed). green=free, red=obstacle, gray=unknown.
+        seg_color = np.zeros_like(base)
+        seg_color[pix_labels == FREE] = (0, 180, 0)
+        seg_color[pix_labels == OCCUPIED] = (0, 0, 200)
+        seg_color[pix_labels == UNKNOWN] = (128, 128, 128)
+        seg_overlay = (0.5 * base + 0.5 * seg_color).astype(np.uint8)
+        cv2.imwrite(os.path.join(d, "segmentation.png"), seg_overlay)
 
         # 2) raw + transparent grid overlay (what the VLM sees)
         if self._grid_overlay is not None:
@@ -339,12 +349,17 @@ class SimplePathTranslator(Node):
             cv2.circle(rp, p, 5, (0, 0, 255), -1)        # red = waypoint
         cv2.imwrite(os.path.join(d, "route_planned.png"), rp)
 
-        # 5,6) occupancy maps (white=free, black=occupied, gray=unknown; flip y so +y is up)
+        # 5,6) occupancy maps (white=free, black=occupied, gray=unknown).
+        # The grid is in the WORLD frame, which is transposed/flipped relative to the
+        # camera image (world x runs along image rows, world y along image columns).
+        # Reorient the PNG with flipud(grid.T) so it visually matches the overhead
+        # image — the grid data itself is left untouched (planning uses world frame).
         def viz(gmap):
-            out = np.full((*gmap.shape, 3), 128, np.uint8)
-            out[gmap == FREE] = (255, 255, 255)
-            out[gmap == OCCUPIED] = (0, 0, 0)
-            return cv2.flip(out, 0)
+            g2 = np.flipud(gmap.T)
+            out = np.full((*g2.shape, 3), 128, np.uint8)
+            out[g2 == FREE] = (255, 255, 255)
+            out[g2 == OCCUPIED] = (0, 0, 0)
+            return out
         cv2.imwrite(os.path.join(d, "occ_true.png"), viz(grid))
         cv2.imwrite(os.path.join(d, "occ_inflated.png"), viz(infl))
         self.get_logger().info(f"Saved 6 debug artifacts to {d}")
