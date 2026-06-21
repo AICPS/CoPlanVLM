@@ -1,6 +1,8 @@
 import os
 from launch import LaunchDescription
-from launch.actions import GroupAction
+from launch.actions import GroupAction, DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from dotenv import load_dotenv
 from ament_index_python.packages import get_package_share_directory
@@ -91,6 +93,10 @@ def generate_launch_description():
         ]
     )
     
+    # Audio nodes (TTS output + STT input) — only launched when use_audio:=true.
+    # They require the `sounddevice` package; off by default so the stack runs quietly.
+    use_audio = IfCondition(LaunchConfiguration('use_audio'))
+
     speech_gen_node = GroupAction([
         Node(
             package='talking-turtle',
@@ -102,7 +108,7 @@ def generate_launch_description():
                 {'openai_api_key': api_key},
             ],
         ),
-    ])
+    ], condition=use_audio)
 
     listener_node = GroupAction([
         Node(
@@ -115,7 +121,7 @@ def generate_launch_description():
                 {'openai_api_key': api_key},
             ],
         ),
-    ])
+    ], condition=use_audio)
 
     joy_node = Node(
         package='joy',
@@ -175,6 +181,10 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'use_audio', default_value='false',
+            description='Launch the audio nodes (node_Speech_Gen TTS + node_Listener STT). '
+                        'Requires the sounddevice package; default false.'),
         exec_api_node,
         triage_api_node,
         control_node,

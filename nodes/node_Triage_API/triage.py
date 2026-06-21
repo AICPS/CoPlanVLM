@@ -14,6 +14,8 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from openai import OpenAI
 
+from node_Triage_API.prompt import TRIAGE_SYSTEM_PROMPT
+
 
 class TriageApiNode(Node):
 
@@ -25,6 +27,7 @@ class TriageApiNode(Node):
 
         # Parameters
         self.declare_parameter('openai_api_key', '')
+        self.declare_parameter('model', 'gpt-4o')
         self.declare_parameter('history_size', 20)
         self.declare_parameter('nav_status_topic', '/nav/status')
         self.declare_parameter('nav_prompt_topic', '/nav/prompt')
@@ -33,6 +36,7 @@ class TriageApiNode(Node):
 
         # Read parameters
         self.api_key = self.get_parameter('openai_api_key').value
+        self.model = self.get_parameter('model').value
         history_sz = self.get_parameter('history_size').value
         self.nav_status_topic = self.get_parameter('nav_status_topic').value
         self.nav_prompt_topic = self.get_parameter('nav_prompt_topic').value
@@ -120,10 +124,11 @@ class TriageApiNode(Node):
             })
         try:
             response = self.client.responses.create(
-                prompt={
-                    "id": "pmpt_685c3b930ee48196b1dc9866c1f3452906bc8a963b8044a2",
-                    "version": "4"
-                },
+                model=self.model,
+                instructions=TRIAGE_SYSTEM_PROMPT,
+                # In-repo prompt now (see node_Triage_API/prompt.py). Old server-stored
+                # prompt kept as a fallback — uncomment to switch back:
+                # prompt={"id": "pmpt_685c3b930ee48196b1dc9866c1f3452906bc8a963b8044a2", "version": "4"},
                 input=chat,
             )
             output = response.output_text.strip()

@@ -28,6 +28,8 @@ from openai import OpenAI
 import base64
 from time import sleep
 
+from node_Executive_API.prompt import EXECUTIVE_SYSTEM_PROMPT
+
 # ----------------------------------------------------------------------
 # Node definition
 # ----------------------------------------------------------------------
@@ -40,6 +42,7 @@ class ExecutiveApiNode(Node):
 
         # ---------- ROS parameters ----------
         self.declare_parameter('openai_api_key', '')
+        self.declare_parameter('model', 'gpt-4o')                   # vision-capable planner model
         self.declare_parameter('nav_prompt_topic', '/nav/prompt')  # ⇐ input
         self.declare_parameter('exec_path_topic',  '/path')     # ⇐ output
         self.declare_parameter('exec_status_topic', '/nav/status')   # ⇐ output
@@ -48,6 +51,7 @@ class ExecutiveApiNode(Node):
 
 
         self.api_key: str   = self.get_parameter('openai_api_key').value
+        self.model: str     = self.get_parameter('model').value
         self.nav_prompt_topic: str = self.get_parameter('nav_prompt_topic').value
         self.exec_path_topic: str   = self.get_parameter('exec_path_topic').value
         self.exec_status_topic: str = self.get_parameter('exec_status_topic').value
@@ -87,19 +91,14 @@ class ExecutiveApiNode(Node):
             self.map = self._encode_image(self.map_path)
 
             response = self.client.responses.create(
-                prompt={
-                    "id": "pmpt_685963df1d0081958a7bbfdd74bdae590a18ad364ec2d535",
-                    "version": "5"
-                },
-                # prompt={
-                #     "id": "pmpt_68d6bfb538708195a919d8d93d58e9b20c3d5460618192f7",
-                #     "version": "11"
-                # },
-                # prompt={
-                #     "id": "pmpt_6a0261312ee881939341b343263b23280651a298466c79a0",
-                #     "version": "4"
-                # },
-                # model="gpt-5"
+                model=self.model,
+                instructions=EXECUTIVE_SYSTEM_PROMPT,
+                # --- Switched to the in-repo prompt (node_Executive_API/prompt.py). ---
+                # PREVIOUSLY ACTIVE server-stored prompt (uncomment to restore exactly):
+                # prompt={"id": "pmpt_685963df1d0081958a7bbfdd74bdae590a18ad364ec2d535", "version": "5"},
+                # Other (already-inactive) stored-prompt alternates that were here before:
+                # prompt={"id": "pmpt_68d6bfb538708195a919d8d93d58e9b20c3d5460618192f7", "version": "11"},
+                # prompt={"id": "pmpt_6a0261312ee881939341b343263b23280651a298466c79a0", "version": "4"},
                 input=[
                     {
                         "role": "user",
@@ -124,9 +123,16 @@ class ExecutiveApiNode(Node):
                 self._publish_status(False, 'malformed JSON from model')
                 return
 
-            # Publish path
+            # Validate + publish path — must be a flat list of grid labels (the translator
+            # expects a JSON list). Fail loudly if the model returns another shape.
+            path = result.get('path', [])
+            if not isinstance(path, list):
+                self.get_logger().error(
+                    f"Model 'path' is not a list (got {type(path).__name__}: {path!r}); not publishing.")
+                self._publish_status(False, 'planner returned a non-list path')
+                return
             path_msg = String()
-            path_msg.data = json.dumps(result.get('path', []))            
+            path_msg.data = json.dumps(path)
             self.path_pub.publish(path_msg)
 
             # Log through ROS logger (INFO)
