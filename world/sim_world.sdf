@@ -9,6 +9,15 @@
     <plugin name='ignition::gazebo::systems::Physics' filename='libignition-gazebo-physics-system.so'/>
     <plugin name='ignition::gazebo::systems::UserCommands' filename='libignition-gazebo-user-commands-system.so'/>
     <plugin name='ignition::gazebo::systems::SceneBroadcaster' filename='libignition-gazebo-scene-broadcaster-system.so'/>
+    <!-- World-scope Sensors (render) + Contact systems. These are global singletons; declaring
+         them once here (instead of inside each robot's create3 description, which is stripped at
+         spawn) lets multiple robots share one render scene without the multi-robot "Visual
+         already exists" crash (turtlebot4_simulator#60). render_engine matches create3's prior
+         value (ogre) so sensor rendering is unchanged. -->
+    <plugin name='ignition::gazebo::systems::Sensors' filename='libignition-gazebo-sensors-system.so'>
+      <render_engine>ogre</render_engine>
+    </plugin>
+    <plugin name='ignition::gazebo::systems::Contact' filename='libignition-gazebo-contact-system.so'/>
     <scene>
       <ambient>1 1 1 1</ambient>
       <background>0.3 0.7 0.9 1</background>

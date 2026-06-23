@@ -26,6 +26,7 @@ def generate_launch_description():
     
     # Define Robot's Name
     bot_name = 'raph'
+    bot2_name = 'raph2'   # second robot (blue hat); stubbed control on /raph2/* topics
 
     # Executive API node, OpenAI pathing
     exec_api_node = GroupAction([
@@ -77,6 +78,38 @@ def generate_launch_description():
             name='node_Odometry_To_Pose',
             output='screen',
             emulate_tty=True,
+        )
+
+    # --- Robot 2 (raph2) stubbed control: the same nodes, remapped into the raph2
+    # namespace. No planner feeds it yet — drive it manually by publishing to
+    # /raph2/world_path (Float32MultiArray [x1,y1,x2,y2,...]).
+    control_node_2 = GroupAction([
+        Node(
+            package='talking-turtle',
+            executable='node_Control',
+            name='node_Control_2',
+            output='screen',
+            emulate_tty=True,
+            remappings=[
+                ('/cmd_vel', '/' + bot2_name + '/cmd_vel'),
+                ('/world_path', '/' + bot2_name + '/world_path'),
+                ('/pose_stamped', '/' + bot2_name + '/pose_stamped'),
+            ],
+        ),
+    ])
+
+    odometry_to_pose_node_2 = Node(
+            package='talking-turtle',
+            executable='node_Odometry_To_Pose',
+            name='node_Odometry_To_Pose_2',
+            output='screen',
+            emulate_tty=True,
+            parameters=[
+                {'input_topic': '/' + bot2_name + '/sim_ground_truth_pose'},
+            ],
+            remappings=[
+                ('/pose_stamped', '/' + bot2_name + '/pose_stamped'),
+            ],
         )
 
     # Translator node, grid coords to MoCap coords
@@ -189,6 +222,8 @@ def generate_launch_description():
         triage_api_node,
         control_node,
         odometry_to_pose_node,
+        control_node_2,
+        odometry_to_pose_node_2,
         path_translator_node,
         speech_gen_node,
         listener_node,
