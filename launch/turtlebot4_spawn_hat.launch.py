@@ -1,7 +1,16 @@
-# Based on Clearpath's turtlebot4_spawn.launch.py (Apache-2.0). Modified to build the
-# robot_description from talking-turtle's turtlebot4_hat.urdf.xacro so the spawned robot
-# carries a colored "hat" disk for overhead identification. Everything else (bridges,
-# create3 nodes, static TFs, spawn-from-topic) is identical to the stock spawn.
+# Based on Clearpath's turtlebot4_spawn.launch.py (Apache-2.0). Identical to
+# turtlebot4_spawn_filtered.launch.py except the robot_description is built from
+# talking-turtle's turtlebot4_hat.urdf.xacro so the spawned robot carries a colored "hat"
+# disk for overhead identification (so the VLM can tell two robots apart).
+#
+# As in the filtered launch, robot_description is produced by gen_robot_description.py, which
+# runs the xacro and then strips the world-singleton `Sensors` + `Contact` system plugins from
+# the output. The hat xacro <xacro:include>s the STOCK turtlebot4.urdf.xacro, so it inherits
+# those same singleton plugins and needs the identical strip — without it, adding the 2nd robot
+# triggers the multi-robot "Visual already exists" crash (turtlebot4_simulator#60). Those
+# systems are declared once at world scope in sim_world.sdf instead. Nothing in /opt/ros is
+# modified; the strip is a pure runtime xacro->stdout transform.
+# Everything else (bridges, create3 nodes, static TFs, spawn-from-topic) is identical to stock.
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -23,7 +32,7 @@ ARGUMENTS = [
     DeclareLaunchArgument('model', default_value='standard',
                           choices=['standard', 'lite'],
                           description='Turtlebot4 Model'),
-    DeclareLaunchArgument('namespace', default_value='',
+    DeclareLaunchArgument('namespace', default_value='raph2',
                           description='Robot namespace'),
     DeclareLaunchArgument('hat_color', default_value='0 0 1 1',
                           description='RGBA color of the overhead marker disk.'),
@@ -54,8 +63,11 @@ def generate_launch_description():
         [pkg_irobot_create_common_bringup, 'launch', 'create3_nodes.launch.py'])
     create3_ignition_nodes_launch = PathJoinSubstitution(
         [pkg_irobot_create_ignition_bringup, 'launch', 'create3_ignition_nodes.launch.py'])
+    # Hat description (standard TurtleBot 4 + colored hat) + our generator/strip script.
     hat_xacro = PathJoinSubstitution(
         [pkg_talking_turtle, 'urdf', 'turtlebot4_hat.urdf.xacro'])
+    gen_script = PathJoinSubstitution(
+        [pkg_talking_turtle, 'scripts', 'gen_robot_description.py'])
 
     # Parameters
     param_file_cmd = DeclareLaunchArgument(
@@ -76,10 +88,20 @@ def generate_launch_description():
     # Spawn robot slightly closer to the floor to reduce the drop
     z_robot = OffsetParser(z, 0.0)
 
+    # NOTE: controllers (joint_state_broadcaster, diffdrive_controller) are NOT spawned here.
+    # The ign_ros2_control controller_manager advertises its services before its resource manager
+    # is ready to *configure* controllers, and a spawner only configures once (no retry) — so any
+    # in-launch spawner fires too early and fails. They're loaded instead by scripts/
+    # spawn_second_robot.sh, which waits a fixed delay after this launch so the CM is fully ready
+    # (replicating the manual `ros2 run controller_manager spawner ...` timing that always works).
+
     spawn_robot_group_action = GroupAction([
         PushRosNamespace(namespace),
 
-        # Robot description (custom: standard TurtleBot 4 + colored hat).
+        # Robot description: hat xacro (standard TurtleBot 4 + colored hat), run through
+        # gen_robot_description.py which strips the world-singleton Sensors + Contact system
+        # plugins (now declared in sim_world.sdf).
+        # `python3 <gen_script> <xacro> gazebo:=ignition namespace:=<ns> hat_color:="<rgba>"`.
         # hat_color is quoted so its spaces survive shlex tokenization of the xacro command.
         Node(
             package='robot_state_publisher',
@@ -89,7 +111,8 @@ def generate_launch_description():
             parameters=[
                 {'use_sim_time': LaunchConfiguration('use_sim_time')},
                 {'robot_description': ParameterValue(Command([
-                    'xacro', ' ', hat_xacro, ' ',
+                    'python3', ' ', gen_script, ' ',
+                    hat_xacro, ' ',
                     'gazebo:=ignition', ' ',
                     'namespace:=', namespace, ' ',
                     'hat_color:="', hat_color, '"']), value_type=str)},
@@ -166,6 +189,7 @@ def generate_launch_description():
         ),
 
         # OAKD static transform
+        # Required for pointcloud. See https://github.com/gazebosim/gz-sensors/issues/239
         Node(
             name='camera_stf',
             package='tf2_ros',

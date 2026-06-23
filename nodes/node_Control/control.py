@@ -49,7 +49,7 @@ class ControlNode(Node):
         self.mocap_subscriber = self.create_subscription(PoseStamped, "/pose_stamped", self.mocap_callback, qos)
         self.mocap_subscriber       # Prevent unused variable warning
         
-        self.world_path_subscriber = self.create_subscription(Float32MultiArray, "/world_path", self._world_path_cb, 1)
+        self.world_path_subscriber = self.create_subscription(Float32MultiArray, "/waypoint_path", self._world_path_cb, 1)
         self.world_path_subscriber       # Prevent unused variable warning
 
         self.create_timer(0.1, self.drive_to_goal)

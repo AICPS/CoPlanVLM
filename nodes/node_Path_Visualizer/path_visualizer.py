@@ -36,10 +36,9 @@ class PathVisualizer(Node):
         self.v_column = self.get_parameter("v_column").value
 
         self.path_topic = self.get_parameter("path_topic").value
-        self.world_path_topic = self.get_parameter("world_path_topic").value
+        self.robot_names = [str(n) for n in self.get_parameter("robot_names").value]
         self.raw_map_topic = self.get_parameter("raw_map_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
-        self.pose_topic = self.get_parameter("pose_topic").value
         self.viz_topic = self.get_parameter("viz_topic").value
 
         self.save_overlays = bool(self.get_parameter("save_overlays").value)
@@ -71,11 +70,19 @@ class PathVisualizer(Node):
 
         self.bridge = CvBridge()
 
+        # Distinct BGR color per robot for its path line + marker (cycled if more robots
+        # than colors). raph -> magenta, raph2 -> cyan by default.
+        palette = [(255, 0, 255), (255, 255, 0), (0, 255, 255), (255, 128, 0)]
+        self.robot_colors: Dict[str, Tuple[int, int, int]] = {
+            name: palette[i % len(palette)] for i, name in enumerate(self.robot_names)
+        }
+
         self.latest_raw_map: Optional[np.ndarray] = None
         self.captured_map: Optional[np.ndarray] = None
-        self.latest_path_labels: List[str] = []
-        self.latest_world_path: List[Tuple[float, float]] = []
-        self.latest_pose: Optional[PoseStamped] = None
+        # Per-robot latest state, keyed by robot name.
+        self.latest_path_labels: Dict[str, List[str]] = {n: [] for n in self.robot_names}
+        self.latest_world_path: Dict[str, List[Tuple[float, float]]] = {n: [] for n in self.robot_names}
+        self.latest_pose: Dict[str, Optional[PoseStamped]] = {n: None for n in self.robot_names}
         self.camera_matrix: Optional[np.ndarray] = None
         self.dist_coeffs: Optional[np.ndarray] = None
 
@@ -83,11 +90,16 @@ class PathVisualizer(Node):
             Path(get_package_share_directory("talking-turtle")) / "path_overlay.png"
         )
 
+        # Single planner /grid_path (a {robot: [labels]} dict) + shared raw map + camera info.
         self.create_subscription(String, self.path_topic, self._path_callback, 10)
-        self.create_subscription(Float32MultiArray, self.world_path_topic, self._world_path_callback, 10)
         self.create_subscription(Image, self.raw_map_topic, self._raw_map_callback, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 1)
-        self.create_subscription(PoseStamped, self.pose_topic, self._pose_callback, 10)
+        # Per-robot world path + ground-truth pose.
+        for name in self.robot_names:
+            self.create_subscription(
+                Float32MultiArray, f"/{name}/waypoint_path", self._make_world_path_cb(name), 10)
+            self.create_subscription(
+                PoseStamped, f"/{name}/sim_ground_truth_pose", self._make_pose_cb(name), 10)
 
         self.viz_publisher = self.create_publisher(Image, self.viz_topic, 10)
 
@@ -102,8 +114,8 @@ class PathVisualizer(Node):
         self.declare_parameter("u_column", "center_x")
         self.declare_parameter("v_column", "center_y")
 
-        self.declare_parameter("path_topic", "/path")
-        self.declare_parameter("world_path_topic", "/world_path")
+        self.declare_parameter("path_topic", "/grid_path")
+        self.declare_parameter("robot_names", ["raph", "raph2"])
         self.declare_parameter("raw_map_topic", "/raw_map")
         self.declare_parameter("camera_info_topic", "/ids_overhead/camera_info")
         self.declare_parameter("pose_topic", "/raph/sim_ground_truth_pose")
@@ -152,23 +164,27 @@ class PathVisualizer(Node):
     def _path_callback(self, msg: String) -> None:
         try:
             data = json.loads(msg.data)
-            if isinstance(data, list):
-                self.latest_path_labels = [str(x) for x in data]
-            else:
-                self.latest_path_labels = []
         except json.JSONDecodeError:
-            self.latest_path_labels = []
-            self.get_logger().warn("/path is not valid JSON list")
+            self.get_logger().warn("/grid_path is not valid JSON")
             return
+        if not isinstance(data, dict):
+            self.get_logger().warn("/grid_path is not a {robot: [labels]} object")
+            return
+        for name in self.robot_names:
+            labels = data.get(name, [])
+            self.latest_path_labels[name] = (
+                [str(x) for x in labels] if isinstance(labels, list) else [])
 
         # Capture map once and draw waypoints for a stable path snapshot.
         self.plot_waypoints_on_captured_image()
 
-    def _world_path_callback(self, msg: Float32MultiArray) -> None:
-        coords: List[Tuple[float, float]] = []
-        for i in range(0, len(msg.data) - 1, 2):
-            coords.append((float(msg.data[i]), float(msg.data[i + 1])))
-        self.latest_world_path = coords
+    def _make_world_path_cb(self, name: str):
+        def _cb(msg: Float32MultiArray) -> None:
+            coords: List[Tuple[float, float]] = []
+            for i in range(0, len(msg.data) - 1, 2):
+                coords.append((float(msg.data[i]), float(msg.data[i + 1])))
+            self.latest_world_path[name] = coords
+        return _cb
 
     def _raw_map_callback(self, msg: Image) -> None:
         try:
@@ -192,12 +208,14 @@ class PathVisualizer(Node):
             return image
         return cv2.undistort(image, self.camera_matrix, self.dist_coeffs)
 
-    def _pose_callback(self, msg: PoseStamped) -> None:
-        self.latest_pose = msg
+    def _make_pose_cb(self, name: str):
+        def _cb(msg: PoseStamped) -> None:
+            self.latest_pose[name] = msg
+        return _cb
 
-    def _grid_path_pixels(self) -> List[Tuple[int, int]]:
+    def _grid_path_pixels(self, labels: List[str]) -> List[Tuple[int, int]]:
         pixels: List[Tuple[int, int]] = []
-        for label in self.latest_path_labels:
+        for label in labels:
             uv = self.grid_pixels.get(label)
             if uv is None:
                 continue
@@ -224,9 +242,11 @@ class PathVisualizer(Node):
         image: np.ndarray,
         start_pt: Tuple[int, int],
         end_pt: Tuple[int, int],
+        color: Optional[Tuple[int, int, int]] = None,
     ) -> None:
-        """Draw a navy shaft with an orange arrowhead."""
-        cv2.line(image, start_pt, end_pt, self.path_color, self.line_thickness)
+        """Draw a colored shaft (per-robot when color given) with an orange arrowhead."""
+        shaft_color = color if color is not None else self.path_color
+        cv2.line(image, start_pt, end_pt, shaft_color, self.line_thickness)
 
         dx = end_pt[0] - start_pt[0]
         dy = end_pt[1] - start_pt[1]
@@ -257,53 +277,41 @@ class PathVisualizer(Node):
         head = np.array([end_pt, left_pt, right_pt], dtype=np.int32)
         cv2.fillConvexPoly(image, head, self.arrowhead_color)
 
-    def plot_waypoints_on_captured_image(self) -> None:
-        """Plot waypoint arrows on the captured map image and publish/save result."""
-        if self.captured_map is None:
-            return
-
-        image = self.captured_map.copy()
-        path_pixels = self._grid_path_pixels()
-
+    def _draw_grid_path(
+        self,
+        image: np.ndarray,
+        path_pixels: List[Tuple[int, int]],
+        color: Tuple[int, int, int],
+        label_prefix: str = "",
+    ) -> None:
+        """Draw one robot's grid-label route: start/end markers + colored arrows."""
+        prefix = f"{label_prefix} " if label_prefix else ""
         if len(path_pixels) >= 1:
             cv2.circle(image, path_pixels[0], self.circle_radius, self.start_color, 3)
             cv2.putText(
-                image,
-                "Start",
+                image, f"{prefix}S",
                 (path_pixels[0][0] + 10, path_pixels[0][1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                self.start_color,
-                2,
-                cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.start_color, 2, cv2.LINE_AA,
             )
         if len(path_pixels) >= 2:
             cv2.circle(image, path_pixels[-1], self.circle_radius, self.end_color, 3)
             cv2.putText(
-                image,
-                "End",
+                image, f"{prefix}E",
                 (path_pixels[-1][0] + 10, path_pixels[-1][1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                self.end_color,
-                2,
-                cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.end_color, 2, cv2.LINE_AA,
             )
-
         for i in range(len(path_pixels) - 1):
-            start_pt = path_pixels[i]
-            end_pt = path_pixels[i + 1]
-            self._draw_colored_arrow(image, start_pt, end_pt)
-            cv2.putText(
-                image,
-                str(i + 1),
-                (start_pt[0] + 8, start_pt[1] - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            self._draw_colored_arrow(image, path_pixels[i], path_pixels[i + 1], color)
+
+    def plot_waypoints_on_captured_image(self) -> None:
+        """Plot each robot's waypoint arrows on the captured map and publish/save result."""
+        if self.captured_map is None:
+            return
+
+        image = self.captured_map.copy()
+        for name in self.robot_names:
+            path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
+            self._draw_grid_path(image, path_pixels, self.robot_colors[name], name)
 
         try:
             out_msg = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
@@ -318,67 +326,52 @@ class PathVisualizer(Node):
                 self.get_logger().warn(f"Failed to save overlay image: {exc}")
 
     def plot_tracking_window(self) -> None:
-        """Show live OpenCV tracking window using world path, VLM path, and robot pose."""
+        """Show live OpenCV tracking window: each robot's world path, VLM path, and pose."""
         if self.latest_raw_map is None:
             return
 
         frame = self.latest_raw_map.copy()
 
-        # Draw world path from /world_path (metres) converted to pixels.
-        world_pixels = [self._world_to_pixel(x, y) for x, y in self.latest_world_path]
-        for i in range(len(world_pixels) - 1):
-            cv2.line(frame, world_pixels[i], world_pixels[i + 1], self.world_path_color, 2)
+        for name in self.robot_names:
+            color = self.robot_colors[name]
 
-        # Draw VLM label path from /path as arrows.
-        path_pixels = self._grid_path_pixels()
-        if len(path_pixels) >= 1:
-            cv2.circle(frame, path_pixels[0], self.circle_radius, self.start_color, 3)
-            cv2.putText(
-                frame,
-                "S",
-                (path_pixels[0][0] + 10, path_pixels[0][1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                self.start_color,
-                2,
-                cv2.LINE_AA,
-            )
-        if len(path_pixels) >= 2:
-            cv2.circle(frame, path_pixels[-1], self.circle_radius, self.end_color, 3)
-            cv2.putText(
-                frame,
-                "E",
-                (path_pixels[-1][0] + 10, path_pixels[-1][1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                self.end_color,
-                2,
-                cv2.LINE_AA,
-            )
-        for i in range(len(path_pixels) - 1):
-            self._draw_colored_arrow(frame, path_pixels[i], path_pixels[i + 1])
+            # Waypoint path from /<name>/waypoint_path (metres -> pixels), in the robot's color.
+            world_pixels = [self._world_to_pixel(x, y) for x, y in self.latest_world_path[name]]
+            for i in range(len(world_pixels) - 1):
+                cv2.line(frame, world_pixels[i], world_pixels[i + 1], color, 2)
 
-        # Draw robot pose from /raph/sim_ground_truth_pose.
-        if self.latest_pose is not None:
-            pose = self.latest_pose.pose
-            robot_u, robot_v = self._world_to_pixel(pose.position.x, pose.position.y)
-            yaw = self._yaw_from_quaternion(
-                pose.orientation.x,
-                pose.orientation.y,
-                pose.orientation.z,
-                pose.orientation.w,
-            )
-            arrow_len = 30
-            tip = (
-                int(robot_u + arrow_len * math.cos(yaw)),
-                int(robot_v + arrow_len * math.sin(yaw)),
-            )
-            cv2.circle(frame, (robot_u, robot_v), 8, self.robot_color, -1)
-            cv2.arrowedLine(frame, (robot_u, robot_v), tip, (255, 255, 255), 5, tipLength=0.5)
+            # VLM grid-label path from /grid_path as colored arrows.
+            path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
+            self._draw_grid_path(frame, path_pixels, color, name)
 
+            # Robot pose from /<name>/sim_ground_truth_pose.
+            pose_msg = self.latest_pose[name]
+            if pose_msg is not None:
+                pose = pose_msg.pose
+                robot_u, robot_v = self._world_to_pixel(pose.position.x, pose.position.y)
+                yaw = self._yaw_from_quaternion(
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                    pose.orientation.w,
+                )
+                arrow_len = 30
+                tip = (
+                    int(robot_u + arrow_len * math.cos(yaw)),
+                    int(robot_v + arrow_len * math.sin(yaw)),
+                )
+                cv2.circle(frame, (robot_u, robot_v), 8, color, -1)
+                cv2.arrowedLine(frame, (robot_u, robot_v), tip, (255, 255, 255), 5, tipLength=0.5)
+                cv2.putText(
+                    frame, name, (robot_u + 10, robot_v + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
+                )
+
+        total_labels = sum(len(v) for v in self.latest_path_labels.values())
+        total_world = sum(len(v) for v in self.latest_world_path.values())
         cv2.putText(
             frame,
-            f"waypoints: {len(self.latest_path_labels)}  world_pts: {len(self.latest_world_path)}",
+            f"waypoints: {total_labels}  world_pts: {total_world}",
             (20, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.65,

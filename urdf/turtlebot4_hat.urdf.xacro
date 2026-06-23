@@ -21,7 +21,7 @@
   <link name="hat_link">
     <visual>
       <geometry>
-        <cylinder radius="0.11" length="0.02"/>
+        <cylinder radius="0.12" length="0.02"/>
       </geometry>
       <material name="hat_material">
         <color rgba="$(arg hat_color)"/>
@@ -32,7 +32,7 @@
   <joint name="hat_joint" type="fixed">
     <parent link="shell_link"/>
     <child link="hat_link"/>
-    <origin xyz="0 0 0.12" rpy="0 0 0"/>
+    <origin xyz="0 0 0.26" rpy="0 0 0"/>
   </joint>
 
   <!-- Ignition/Gazebo material (this is what the sim renders) -->

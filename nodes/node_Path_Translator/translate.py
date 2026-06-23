@@ -3,8 +3,8 @@
 simple_path_translator.py  –  v0.5 (straight‑down camera, explicit Z scale)
 -------------------------------------------------------------------------
 ROS 2 node that converts a JSON list of grid labels (e.g. ["L1", "M2"]) sent
-on `/path` into ground‑plane metres and publishes them on `/world_path` as a
-`Float32MultiArray`.
+on `/grid_path` into ground‑plane metres and publishes each robot's route on
+`/<robot>/waypoint_path` as a `Float32MultiArray`.
 
 **What changed in v0.5**
 -----------------------
@@ -80,8 +80,9 @@ class SimplePathTranslator(Node):
         self.declare_parameter("label_column", "cell")
         self.declare_parameter("u_column", "center_x")
         self.declare_parameter("v_column", "center_y")
-        self.declare_parameter("path_topic", "/path")
-        self.declare_parameter("world_path_topic", "/world_path")
+        self.declare_parameter("path_topic", "/grid_path")
+        # One robot per entry; each robot's plan is published to /<name>/waypoint_path.
+        self.declare_parameter("robot_names", ["raph", "raph2"])
 
         self.declare_parameter("origin_label", "H4")
         self.declare_parameter("world_origin_x", 0.0)
@@ -105,7 +106,7 @@ class SimplePathTranslator(Node):
         self.u_col     = self.get_parameter("u_column").get_parameter_value().string_value
         self.v_col     = self.get_parameter("v_column").get_parameter_value().string_value
         path_topic     = self.get_parameter("path_topic").get_parameter_value().string_value
-        world_topic    = self.get_parameter("world_path_topic").get_parameter_value().string_value
+        self.robot_names = list(self.get_parameter("robot_names").value)
 
         self.origin_label = self.get_parameter("origin_label").value
         self.x0 = self.get_parameter("world_origin_x").value
@@ -158,7 +159,11 @@ class SimplePathTranslator(Node):
         # (depth-1, default QoS, matching node_Map_Gen / node_Path_Visualizer).
         self.create_subscription(Image, self.image_topic, self._on_image, 1)
         self.sub = self.create_subscription(String, path_topic, self._on_path_msg, 10)
-        self.pub = self.create_publisher(Float32MultiArray, world_topic, 10)
+        # One waypoint-path publisher per robot: /<name>/waypoint_path.
+        self.world_pubs: Dict[str, object] = {
+            name: self.create_publisher(Float32MultiArray, f"/{name}/waypoint_path", 10)
+            for name in self.robot_names
+        }
 
         self.get_logger().info("✓")
 
@@ -215,39 +220,29 @@ class SimplePathTranslator(Node):
     #  Subscription callback
     # ──────────────────────────────────────────────────────────────────
     def _on_path_msg(self, msg: String) -> None:
-        """Plan a collision-free path through the requested region centroids.
+        """Plan a collision-free path for each robot named in the incoming message.
 
-        labels -> world centroids -> project onto the inflated costmap's free space
-        -> pairwise A* -> per-segment line-of-sight thinning -> publish /world_path.
-        Costmap is rebuilt from the latest overhead frame on every call.
+        msg.data is a JSON object {robot_name: [grid labels]}. On every new plan message the
+        inflated costmap is rebuilt fresh from the latest overhead frame, then reused for all
+        robots in THAT message (the segmentation is the expensive step and both robots see the
+        same instant, so re-segmenting per robot would be wasteful). Each robot's labels are
+        turned into world centroids -> projected onto free space -> pairwise A* -> per-segment
+        line-of-sight thinning, and published to /<robot>/waypoint_path.
         """
         try:
-            labels: List[str] = json.loads(msg.data)
-            assert isinstance(labels, list)
+            plans = json.loads(msg.data)
+            assert isinstance(plans, dict)
         except Exception as e:
-            self.get_logger().error(f"Bad /path message (expect JSON list): {e}")
+            self.get_logger().error(
+                f"Bad /grid_path message (expect JSON object {{robot: [labels]}}): {e}")
             return
 
         if self.latest_rgb is None:
             self.get_logger().warn("No overhead image received yet — cannot plan. Skipping.")
             return
 
-        # 1) labels -> world centroids (also remember pixel positions for debug overlays)
-        centroids: List[tuple] = []
-        sel_pixels: List[tuple] = []
-        for label in labels:
-            if label not in self.grid_px:
-                self.get_logger().warn(f"Unknown label '{label}' – skipping.")
-                continue
-            u, v, _ = self.grid_px[label]
-            sel_pixels.append((float(u), float(v)))
-            x, y = self._pixel_to_world(self.grid_px[label])
-            centroids.append((float(x), float(y)))
-        if not centroids:
-            self.get_logger().warn("No valid waypoints in /path; nothing to plan.")
-            return
-
-        # 2) rebuild inflated costmap from the latest frame
+        # Rebuild the inflated costmap from the latest frame for this replan, then reuse it
+        # across the robots in this message.
         pix_labels, _ = self.segmenter.classify(
             self.latest_rgb, self.traversable_prompts,
             self.untraversable_prompts, self.threshold)
@@ -255,33 +250,62 @@ class SimplePathTranslator(Node):
                                        self.sx, self.sy, self.u0, self.v0, self.resolution)
         infl = inflate_occupancy(grid, self.resolution, self.inflation_radius)
 
-        # 3) project each centroid onto the nearest free cell
+        for name, labels in plans.items():
+            if name not in self.world_pubs:
+                self.get_logger().warn(
+                    f"No publisher for robot '{name}' (not in robot_names); skipping.")
+                continue
+            if not isinstance(labels, list):
+                self.get_logger().warn(f"[{name}] Route is not a list; skipping.")
+                continue
+            self._plan_one(name, labels, pix_labels, grid, infl, meta)
+
+    # ------------------------------------------------------------------
+    def _plan_one(self, name, labels, pix_labels, grid, infl, meta) -> None:
+        """Plan one robot's route on the prebuilt costmap and publish /<name>/waypoint_path."""
+        # 1) labels -> world centroids (also remember pixel positions for debug overlays)
+        centroids: List[tuple] = []
+        sel_pixels: List[tuple] = []
+        for label in labels:
+            if label not in self.grid_px:
+                self.get_logger().warn(f"[{name}] Unknown label '{label}' – skipping.")
+                continue
+            u, v, _ = self.grid_px[label]
+            sel_pixels.append((float(u), float(v)))
+            x, y = self._pixel_to_world(self.grid_px[label])
+            centroids.append((float(x), float(y)))
+        if not centroids:
+            self.get_logger().warn(f"[{name}] No valid waypoints in route; nothing to plan.")
+            return
+
+        # 2) project each centroid onto the nearest free cell
         anchors: List[tuple] = []
         for (x, y) in centroids:
             free_cell = project_to_free(infl, world_to_cell(x, y, meta))
             if free_cell is None:
                 self.get_logger().warn(
-                    f"Waypoint ({x:.2f},{y:.2f}) has no free cell nearby; skipping.")
+                    f"[{name}] Waypoint ({x:.2f},{y:.2f}) has no free cell nearby; skipping.")
                 continue
             anchors.append(free_cell)
         if not anchors:
-            self.get_logger().warn("No projectable waypoints; nothing to publish.")
+            self.get_logger().warn(f"[{name}] No projectable waypoints; nothing to publish.")
             return
 
-        # 4) pairwise A* + 5) per-segment LOS thinning (anchors preserved).
+        # 3) pairwise A* + per-segment LOS thinning (anchors preserved).
         #    On a pathless segment, skip that anchor and continue from the last reached one.
         full_cells: List[tuple] = [anchors[0]]
         current = anchors[0]
         for nxt in anchors[1:]:
             seg = astar(infl, current, nxt)
             if seg is None:
-                self.get_logger().warn(f"No A* path from {current} to {nxt}; skipping waypoint.")
+                self.get_logger().warn(
+                    f"[{name}] No A* path from {current} to {nxt}; skipping waypoint.")
                 continue
             seg = simplify_path_los(infl, seg)
             full_cells.extend(seg[1:])      # drop duplicate shared endpoint
             current = nxt
 
-        # 6) cells -> world -> publish
+        # 4) cells -> world -> publish to this robot's topic
         flat_xy: List[float] = []
         for (gx, gy) in full_cells:
             wx, wy = cell_to_world(gx, gy, meta)
@@ -289,21 +313,26 @@ class SimplePathTranslator(Node):
 
         arr = Float32MultiArray()
         arr.data = flat_xy
-        self.pub.publish(arr)
+        self.world_pubs[name].publish(arr)
         self.get_logger().info(
-            f"Planned path: {len(anchors)} anchors -> {len(full_cells)} waypoints "
+            f"[{name}] Planned path: {len(anchors)} anchors -> {len(full_cells)} waypoints "
             f"(grid {meta['width']}x{meta['height']} @ {meta['resolution']} m).")
 
         if self.save_debug and self.debug_dir and self.latest_rgb is not None:
             try:
-                self._save_debug(pix_labels, sel_pixels, full_cells, grid, infl, meta)
+                self._save_debug(pix_labels, sel_pixels, full_cells, grid, infl, meta, suffix=name)
             except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(f"Debug save failed: {exc}")
+                self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 
     # ------------------------------------------------------------------
-    def _save_debug(self, pix_labels, sel_pixels, full_cells, grid, infl, meta) -> None:
-        """Write the debug artifacts to self.debug_dir (overwrite in place)."""
-        d = self.debug_dir
+    def _save_debug(self, pix_labels, sel_pixels, full_cells, grid, infl, meta, suffix: str = "") -> None:
+        """Write the debug artifacts to self.debug_dir (overwrite in place).
+
+        When suffix (a robot name) is given, artifacts go in a per-robot subdirectory so the
+        robots planned from one /grid_path message don't overwrite each other's overlays.
+        """
+        d = os.path.join(self.debug_dir, suffix) if suffix else self.debug_dir
+        os.makedirs(d, exist_ok=True)
         base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(d, "raw_overhead.png"), base)
 

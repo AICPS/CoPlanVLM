@@ -39,6 +39,7 @@ def generate_launch_description():
             parameters=[
                 {'openai_api_key': api_key},
                 {'map_path': map_file},
+                {'robot_names': [bot_name, bot2_name]},
             ],
         ),
     ])
@@ -57,7 +58,9 @@ def generate_launch_description():
         ),
     ])
 
-    # Control node, bridges grid to coords
+    # Control node, does low level control of the robot (drive to goal, etc.).
+    # Fully namespaced into raph's topics (symmetric with raph2 below): the translator
+    # publishes raph's plan to /raph/waypoint_path and odom publishes /raph/pose_stamped.
     control_node = GroupAction([
         Node(
             package='talking-turtle',
@@ -66,7 +69,9 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
             remappings=[
-                ('/cmd_vel', '/' + bot_name + '/cmd_vel')
+                ('/cmd_vel', '/' + bot_name + '/cmd_vel'),
+                ('/waypoint_path', '/' + bot_name + '/waypoint_path'),
+                ('/pose_stamped', '/' + bot_name + '/pose_stamped'),
             ],
         ),
     ])
@@ -78,11 +83,17 @@ def generate_launch_description():
             name='node_Odometry_To_Pose',
             output='screen',
             emulate_tty=True,
+            parameters=[
+                {'input_topic': '/' + bot_name + '/sim_ground_truth_pose'},
+            ],
+            remappings=[
+                ('/pose_stamped', '/' + bot_name + '/pose_stamped'),
+            ],
         )
 
-    # --- Robot 2 (raph2) stubbed control: the same nodes, remapped into the raph2
-    # namespace. No planner feeds it yet — drive it manually by publishing to
-    # /raph2/world_path (Float32MultiArray [x1,y1,x2,y2,...]).
+    # --- Robot 2 (raph2): the same control/odom nodes, remapped into the raph2 namespace.
+    # The executive now plans for both robots and the translator routes raph2's plan to
+    # /raph2/waypoint_path (it can still be driven manually by publishing there directly).
     control_node_2 = GroupAction([
         Node(
             package='talking-turtle',
@@ -92,7 +103,7 @@ def generate_launch_description():
             emulate_tty=True,
             remappings=[
                 ('/cmd_vel', '/' + bot2_name + '/cmd_vel'),
-                ('/world_path', '/' + bot2_name + '/world_path'),
+                ('/waypoint_path', '/' + bot2_name + '/waypoint_path'),
                 ('/pose_stamped', '/' + bot2_name + '/pose_stamped'),
             ],
         ),
@@ -123,6 +134,7 @@ def generate_launch_description():
             {'grid_csv': grid_csv_path},
             {'debug_dir': debug_dir},
             {'save_debug': True},
+            {'robot_names': [bot_name, bot2_name]},
         ]
     )
     
@@ -206,10 +218,10 @@ def generate_launch_description():
             {'world_origin_y': 5.5},
             {'metres_per_pixel_x': 1.0 / 138.0},
             {'metres_per_pixel_y': -1.0 / 152.0},
+            {'robot_names': [bot_name, bot2_name]},
         ],
         remappings=[
             ('/raw_map', '/ids_overhead/image'),
-            ('/raph/sim_ground_truth_pose', '/' + bot_name + '/sim_ground_truth_pose'),
         ],
     )
 

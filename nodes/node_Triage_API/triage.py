@@ -93,6 +93,7 @@ class TriageApiNode(Node):
 
     def _user_text_cb(self, msg: String) -> None:
         """Handle incoming user text from the /user_text topic."""
+        self.get_logger().info(f"[triage] received /user_text: {msg.data!r}")
         text = msg.data.strip()
         if text:
             self.process_user_text(text)
@@ -101,6 +102,7 @@ class TriageApiNode(Node):
     # /nav/status callback — store but don’t print planner output
     # ---------------------------------------------------------------------
     def _nav_status_cb(self, msg: String) -> None:
+        self.get_logger().info(f"[triage] received /nav/status: {msg.data!r}")
         self._awaiting_exec_response = False
 
         # Stash planner text into history so the model can reference it later
