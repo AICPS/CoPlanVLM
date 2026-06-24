@@ -145,7 +145,7 @@ class ControlNode(Node):
         self.velocity_publisher.publish(self.command)
 
         # Checks if in proximity to target (capture radius).
-        if error_distance < 0.15:
+        if error_distance < 0.1:
             self.parked = True
 
     # def publish_velocity(self):

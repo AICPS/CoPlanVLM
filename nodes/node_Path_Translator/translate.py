@@ -53,6 +53,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Float32MultiArray
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 import yaml
@@ -94,7 +95,7 @@ class SimplePathTranslator(Node):
         self.declare_parameter("image_topic", "/ids_overhead/image")
         self.declare_parameter("traversable_prompts", ["the floor"])
         self.declare_parameter("untraversable_prompts", [""])   # "" entries filtered out
-        self.declare_parameter("threshold", 0.45)
+        self.declare_parameter("threshold", 0.48)
         self.declare_parameter("resolution", 0.05)              # m / occupancy cell
         self.declare_parameter("inflation_radius", 0.4)         # m (TurtleBot4 radius ~0.17 + margin)
         self.declare_parameter("save_debug", True)
@@ -165,7 +166,21 @@ class SimplePathTranslator(Node):
             for name in self.robot_names
         }
 
+        # Cache each robot's latest world (x, y) so every plan can start at the robot's
+        # current position. Fed by /<name>/pose_stamped (same pose the controller uses).
+        self.robot_xy: Dict[str, object] = {name: None for name in self.robot_names}
+        for name in self.robot_names:
+            self.create_subscription(
+                PoseStamped, f"/{name}/pose_stamped", self._make_pose_cb(name), 10)
+
         self.get_logger().info("✓")
+
+    # ------------------------------------------------------------------
+    def _make_pose_cb(self, name: str):
+        """Build a /<name>/pose_stamped callback that caches the robot's world (x, y)."""
+        def _cb(msg: PoseStamped) -> None:
+            self.robot_xy[name] = (msg.pose.position.x, msg.pose.position.y)
+        return _cb
 
     # ------------------------------------------------------------------
     def _on_image(self, msg: Image) -> None:
@@ -266,6 +281,19 @@ class SimplePathTranslator(Node):
         # 1) labels -> world centroids (also remember pixel positions for debug overlays)
         centroids: List[tuple] = []
         sel_pixels: List[tuple] = []
+
+        # Always start the route at the robot's current position so the path leads from where
+        # the robot actually is (prepended before projection + pairwise A*).
+        cur_xy = self.robot_xy.get(name)
+        if cur_xy is not None:
+            centroids.append((float(cur_xy[0]), float(cur_xy[1])))
+            u, v = world_to_pixel(cur_xy[0], cur_xy[1],
+                                  self.x0, self.y0, self.sx, self.sy, self.u0, self.v0)
+            sel_pixels.append((float(u), float(v)))
+        else:
+            self.get_logger().warn(
+                f"[{name}] No current pose yet; starting route at first label instead.")
+
         for label in labels:
             if label not in self.grid_px:
                 self.get_logger().warn(f"[{name}] Unknown label '{label}' – skipping.")
@@ -320,12 +348,12 @@ class SimplePathTranslator(Node):
 
         if self.save_debug and self.debug_dir and self.latest_rgb is not None:
             try:
-                self._save_debug(pix_labels, sel_pixels, full_cells, grid, infl, meta, suffix=name)
+                self._save_debug(pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta, suffix=name)
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 
     # ------------------------------------------------------------------
-    def _save_debug(self, pix_labels, sel_pixels, full_cells, grid, infl, meta, suffix: str = "") -> None:
+    def _save_debug(self, pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta, suffix: str = "") -> None:
         """Write the debug artifacts to self.debug_dir (overwrite in place).
 
         When suffix (a robot name) is given, artifacts go in a per-robot subdirectory so the
@@ -365,7 +393,9 @@ class SimplePathTranslator(Node):
             cv2.circle(rc, p, 8, (255, 0, 0), -1)        # blue = centroid
         cv2.imwrite(os.path.join(d, "route_centroids.png"), rc)
 
-        # 4) obstacle-avoiding planned route (world -> pixel, green)
+        # 4) obstacle-avoiding planned route (world -> pixel, green line). Dots are colored by
+        #    category: gold = robot start, red = projected centroid (an anchor), yellow = the
+        #    intermediate A* waypoints filling the segments between anchors.
         rp = base.copy()
         ppx = []
         for (gx, gy) in full_cells:
@@ -374,8 +404,15 @@ class SimplePathTranslator(Node):
             ppx.append((int(u), int(v)))
         for a, b in zip(ppx, ppx[1:]):
             cv2.line(rp, a, b, (0, 200, 0), 2)
-        for p in ppx:
-            cv2.circle(rp, p, 5, (0, 0, 255), -1)        # red = waypoint
+        anchor_set = {(int(a[0]), int(a[1])) for a in anchors}
+        for idx, (cell, p) in enumerate(zip(full_cells, ppx)):
+            if idx == 0:
+                color = (0, 215, 255)        # gold = robot start (BGR)
+            elif (int(cell[0]), int(cell[1])) in anchor_set:
+                color = (0, 0, 255)          # red = projected centroid
+            else:
+                color = (0, 255, 255)        # yellow = intermediate waypoint
+            cv2.circle(rp, p, 5, color, -1)
         cv2.imwrite(os.path.join(d, "route_planned.png"), rp)
 
         # 5,6) occupancy maps (white=free, black=occupied, gray=unknown).

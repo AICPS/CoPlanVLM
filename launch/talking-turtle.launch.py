@@ -168,11 +168,13 @@ def generate_launch_description():
         ),
     ], condition=use_audio)
 
-    joy_node = Node(
-        package='joy',
-        executable='joy_node',
-        name='joy_node'
-    )
+    # joy_node disabled for now — only the audio push-to-talk node (node_Listener, use_audio)
+    # consumes /joy, and the unconditional joy_node was leaking orphaned processes.
+    # joy_node = Node(
+    #     package='joy',
+    #     executable='joy_node',
+    #     name='joy_node'
+    # )
 
     mapper_node = GroupAction([
         Node(
@@ -239,7 +241,7 @@ def generate_launch_description():
         path_translator_node,
         speech_gen_node,
         listener_node,
-        joy_node,
+        # joy_node,   # disabled — see commented joy_node definition above
         mapper_node,
         path_visualizer_node,
         # logger_node,

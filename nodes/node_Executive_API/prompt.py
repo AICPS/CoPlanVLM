@@ -28,6 +28,12 @@ You MUST include BOTH robots in the output every time, even if the instruction o
 one of them. A robot that has no task should hold its position: return a single-element list
 containing just its current cell (or an empty list) for that robot.
 
+The two robots must NOT end in the same cell — two robots occupying one cell would collide.
+The final cell of "raph" and the final cell of "raph2" must be DIFFERENT. If the instruction
+would send both to the same place (e.g. "send both to the door"), route one to the goal cell
+and the other to an adjacent open cell next to it. Prefer keeping their full routes from
+crossing or sharing cells where possible, but the ending cells in particular must differ.
+
 Respond with EXACTLY one JSON object, no markdown or text outside the JSON:
 {"paths": {"raph": ["<cell>", ...], "raph2": ["<cell>", ...]},
  "analysis": "<one or two sentences on the chosen routes>"}
@@ -38,6 +44,7 @@ Rules:
   ending at its goal cell. Do NOT return a round trip and do NOT nest further objects
   (no "toGoal"/"return") — just one flat list of labels per robot.
 - Use only valid grid labels that appear on the overlay.
+- The two robots' FINAL cells must be different — never end both routes in the same cell.
 - If a robot's goal is unreachable or it has no task, return an empty list (or its current
   cell only) for that robot and explain briefly in "analysis".
 - Return valid JSON only — no comments, no trailing text.
