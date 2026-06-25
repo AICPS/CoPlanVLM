@@ -146,6 +146,7 @@ class TriageApiNode(Node):
     # Exec helpers
     # ---------------------------------------------------------------------
     def _send_exec_request(self, prompt: str) -> None:
+        self.get_logger().info(f"[triage] sending /nav/prompt to exec: {prompt!r}")
         self.nav_pmt_pub.publish(String(data=prompt))
         self._awaiting_exec_response = True
         self._pending_exec_prompt = prompt

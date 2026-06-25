@@ -10,6 +10,7 @@ from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Twist, PoseStamped
 from tf_transformations import euler_from_quaternion
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from coord_transform import world_to_gazebo
 
 class ControlNode(Node):
     """Contains node to move turtlebot from the specified location into the parking space."""
@@ -84,11 +85,14 @@ class ControlNode(Node):
         """Publishes the difference between the current position and goal position"""
         # Get current odometer reading's x & y variables.
         current_pose = self.current_pose.pose.position
-        goal_coord = self.goal_coordinates
+
+        # The waypoint is in camera/world (image) axes; convert it into the Gazebo frame the
+        # pose is in (gazebo x,y correspond to camera/world y,x — a pure x<->y swap).
+        goal_x, goal_y = world_to_gazebo(self.goal_coordinates[0], self.goal_coordinates[1])
 
         # Calc x & y differences between pose reading & Goal position.
-        x_difference = goal_coord[1] - current_pose.x
-        y_difference = goal_coord[0] - current_pose.y
+        x_difference = goal_x - current_pose.x
+        y_difference = goal_y - current_pose.y
 
         # Initialize odom_error attribute to PoseStamped data type
         self.pose_error = PoseStamped()

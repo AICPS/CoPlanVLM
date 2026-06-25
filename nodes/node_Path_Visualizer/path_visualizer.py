@@ -6,13 +6,15 @@ from __future__ import annotations
 import csv
 import json
 import math
+from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, Image
@@ -20,6 +22,8 @@ from std_msgs.msg import Float32MultiArray, String
 
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
+
+from coord_transform import world_to_pixel, gazebo_to_world
 
 
 class PathVisualizer(Node):
@@ -54,19 +58,8 @@ class PathVisualizer(Node):
         self.world_path_color = tuple(int(c) for c in self.get_parameter("world_path_color").value)
         self.robot_color = tuple(int(c) for c in self.get_parameter("robot_color").value)
 
-        self.origin_label = self.get_parameter("origin_label").value
-        self.world_origin_x = float(self.get_parameter("world_origin_x").value)
-        self.world_origin_y = float(self.get_parameter("world_origin_y").value)
-        self.metres_per_pixel_x = float(self.get_parameter("metres_per_pixel_x").value)
-        self.metres_per_pixel_y = float(self.get_parameter("metres_per_pixel_y").value)
-
+        # Pixel<->world calibration lives entirely in coord_transform (see _world_to_pixel).
         self.grid_pixels = self._load_grid_csv(self.grid_csv)
-        self.origin_pixel = self.grid_pixels.get(self.origin_label)
-        if self.origin_pixel is None:
-            self.get_logger().warn(
-                f"Origin label '{self.origin_label}' not in CSV. Using (0, 0) as fallback."
-            )
-            self.origin_pixel = (0.0, 0.0)
 
         self.bridge = CvBridge()
 
@@ -83,6 +76,10 @@ class PathVisualizer(Node):
         self.latest_path_labels: Dict[str, List[str]] = {n: [] for n in self.robot_names}
         self.latest_world_path: Dict[str, List[Tuple[float, float]]] = {n: [] for n in self.robot_names}
         self.latest_pose: Dict[str, Optional[PoseStamped]] = {n: None for n in self.robot_names}
+        # Per-robot trajectory trail: recent measured poses (gazebo x, y), capped.
+        self.pose_history: Dict[str, Deque[Tuple[float, float]]] = {
+            n: deque(maxlen=3000) for n in self.robot_names
+        }
         self.camera_matrix: Optional[np.ndarray] = None
         self.dist_coeffs: Optional[np.ndarray] = None
 
@@ -94,12 +91,17 @@ class PathVisualizer(Node):
         self.create_subscription(String, self.path_topic, self._path_callback, 10)
         self.create_subscription(Image, self.raw_map_topic, self._raw_map_callback, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 1)
-        # Per-robot world path + ground-truth pose.
+        # Per-robot world path + pose. Pose comes from /<name>/pose_stamped (PoseStamped,
+        # published BEST_EFFORT by node_Odometry_To_Pose) — the SAME source control.py and the
+        # translator use. The previous bug subscribed to /<name>/sim_ground_truth_pose, which is
+        # nav_msgs/Odometry, as PoseStamped, so it silently never connected.
+        pose_qos = QoSProfile(depth=1)
+        pose_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         for name in self.robot_names:
             self.create_subscription(
                 Float32MultiArray, f"/{name}/waypoint_path", self._make_world_path_cb(name), 10)
             self.create_subscription(
-                PoseStamped, f"/{name}/sim_ground_truth_pose", self._make_pose_cb(name), 10)
+                PoseStamped, f"/{name}/pose_stamped", self._make_pose_cb(name), pose_qos)
 
         self.viz_publisher = self.create_publisher(Image, self.viz_topic, 10)
 
@@ -123,7 +125,7 @@ class PathVisualizer(Node):
 
         self.declare_parameter("save_overlays", True)
         self.declare_parameter("window_name", "Path Tracking")
-        self.declare_parameter("display_scale", 0.75)
+        self.declare_parameter("display_scale", 0.5)
         self.declare_parameter("line_thickness", 6)
         self.declare_parameter("circle_radius", 14)
 
@@ -133,12 +135,6 @@ class PathVisualizer(Node):
         self.declare_parameter("end_color", [0, 0, 255])
         self.declare_parameter("world_path_color", [200, 200, 200])
         self.declare_parameter("robot_color", [255, 0, 255])
-
-        self.declare_parameter("origin_label", "H4")
-        self.declare_parameter("world_origin_x", 0.0)
-        self.declare_parameter("world_origin_y", 5.5)
-        self.declare_parameter("metres_per_pixel_x", 1.0 / 138.0)
-        self.declare_parameter("metres_per_pixel_y", -1.0 / 152.0)
 
     def _load_grid_csv(self, csv_path: str) -> Dict[str, Tuple[float, float]]:
         pixels: Dict[str, Tuple[float, float]] = {}
@@ -211,6 +207,7 @@ class PathVisualizer(Node):
     def _make_pose_cb(self, name: str):
         def _cb(msg: PoseStamped) -> None:
             self.latest_pose[name] = msg
+            self.pose_history[name].append((msg.pose.position.x, msg.pose.position.y))
         return _cb
 
     def _grid_path_pixels(self, labels: List[str]) -> List[Tuple[int, int]]:
@@ -223,12 +220,8 @@ class PathVisualizer(Node):
         return pixels
 
     def _world_to_pixel(self, x_world: float, y_world: float) -> Tuple[int, int]:
-        u0, v0 = self.origin_pixel
-        if self.metres_per_pixel_x == 0.0 or self.metres_per_pixel_y == 0.0:
-            return int(u0), int(v0)
-
-        u = u0 + (y_world - self.world_origin_y) / self.metres_per_pixel_x
-        v = v0 + (x_world - self.world_origin_x) / self.metres_per_pixel_y
+        # Calibration owned by coord_transform; this wrapper just rounds to int pixels for cv2.
+        u, v = world_to_pixel(x_world, y_world)
         return int(round(u)), int(round(v))
 
     @staticmethod
@@ -325,6 +318,26 @@ class PathVisualizer(Node):
             except Exception as exc:
                 self.get_logger().warn(f"Failed to save overlay image: {exc}")
 
+    @staticmethod
+    def _draw_dashed_polyline(img, pts, color, thickness=2, dash=14.0, gap=10.0):
+        """Draw a dashed polyline through pts so the actual trail reads distinct from the
+        SOLID planned path (dashes measured along arc length, robust to dense trail points)."""
+        period = dash + gap
+        acc = 0.0  # arc length consumed so far, for continuous dashing across segments
+        for a, b in zip(pts, pts[1:]):
+            seg = math.hypot(b[0] - a[0], b[1] - a[1])
+            if seg < 1e-9:
+                continue
+            steps = max(1, int(seg))
+            for i in range(steps):
+                if (acc + seg * (i / steps)) % period < dash:
+                    x0 = int(round(a[0] + (b[0] - a[0]) * i / steps))
+                    y0 = int(round(a[1] + (b[1] - a[1]) * i / steps))
+                    x1 = int(round(a[0] + (b[0] - a[0]) * (i + 1) / steps))
+                    y1 = int(round(a[1] + (b[1] - a[1]) * (i + 1) / steps))
+                    cv2.line(img, (x0, y0), (x1, y1), color, thickness)
+            acc += seg
+
     def plot_tracking_window(self) -> None:
         """Show live OpenCV tracking window: each robot's world path, VLM path, and pose."""
         if self.latest_raw_map is None:
@@ -344,11 +357,19 @@ class PathVisualizer(Node):
             path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
             self._draw_grid_path(frame, path_pixels, color, name)
 
-            # Robot pose from /<name>/sim_ground_truth_pose.
+            # Actual measured trajectory trail (history of poses), drawn DASHED in the robot's
+            # color so it reads distinct from the SOLID planned path. Poses are in the Gazebo
+            # frame, so swap into the camera/world frame to overlay the planned path.
+            traj = [self._world_to_pixel(*gazebo_to_world(hx, hy))
+                    for hx, hy in self.pose_history[name]]
+            self._draw_dashed_polyline(frame, traj, color, thickness=2)
+
+            # Robot pose from /<name>/pose_stamped.
             pose_msg = self.latest_pose[name]
             if pose_msg is not None:
                 pose = pose_msg.pose
-                robot_u, robot_v = self._world_to_pixel(pose.position.x, pose.position.y)
+                robot_u, robot_v = self._world_to_pixel(
+                    *gazebo_to_world(pose.position.x, pose.position.y))
                 yaw = self._yaw_from_quaternion(
                     pose.orientation.x,
                     pose.orientation.y,
@@ -360,8 +381,9 @@ class PathVisualizer(Node):
                     int(robot_u + arrow_len * math.cos(yaw)),
                     int(robot_v + arrow_len * math.sin(yaw)),
                 )
-                cv2.circle(frame, (robot_u, robot_v), 8, color, -1)
+                cv2.circle(frame, (robot_u, robot_v), 10, color, -1)
                 cv2.arrowedLine(frame, (robot_u, robot_v), tip, (255, 255, 255), 5, tipLength=0.5)
+                cv2.circle(frame, (robot_u, robot_v), 12, (0, 0, 255), 3)   # red ring = current pose
                 cv2.putText(
                     frame, name, (robot_u + 10, robot_v + 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,

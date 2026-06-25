@@ -51,6 +51,7 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String, Float32MultiArray
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
@@ -58,7 +59,7 @@ from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 import yaml
 
-from coord_transform import pixel_to_world, world_to_pixel
+from coord_transform import pixel_to_world, world_to_pixel, gazebo_to_world
 from obs_seg import FREE, OCCUPIED, UNKNOWN
 from obs_seg.segmenter import TraversabilitySegmenter
 from obs_seg.occupancy import (mask_to_occupancy, inflate_occupancy,
@@ -85,11 +86,8 @@ class SimplePathTranslator(Node):
         # One robot per entry; each robot's plan is published to /<name>/waypoint_path.
         self.declare_parameter("robot_names", ["raph", "raph2"])
 
-        self.declare_parameter("origin_label", "H4")
-        self.declare_parameter("world_origin_x", 0.0)
-        self.declare_parameter("world_origin_y", 5.5)
-        self.declare_parameter("metres_per_pixel_x", 1.0 / 138.0)   # horizontal scale
-        self.declare_parameter("metres_per_pixel_y", -1.0 / 152.0)  # vertical scale (inverted)
+        # Pixel<->world calibration (anchor cell + scale) lives entirely in coord_transform;
+        # nothing about it is declared here.
 
         # ─── Obstacle-aware planning params ───────────────────────────────────
         self.declare_parameter("image_topic", "/ids_overhead/image")
@@ -97,7 +95,7 @@ class SimplePathTranslator(Node):
         self.declare_parameter("untraversable_prompts", [""])   # "" entries filtered out
         self.declare_parameter("threshold", 0.48)
         self.declare_parameter("resolution", 0.05)              # m / occupancy cell
-        self.declare_parameter("inflation_radius", 0.4)         # m (TurtleBot4 radius ~0.17 + margin)
+        self.declare_parameter("inflation_radius", 0.5)         # m (TurtleBot4 radius ~0.17 + margin)
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
 
@@ -108,12 +106,6 @@ class SimplePathTranslator(Node):
         self.v_col     = self.get_parameter("v_column").get_parameter_value().string_value
         path_topic     = self.get_parameter("path_topic").get_parameter_value().string_value
         self.robot_names = list(self.get_parameter("robot_names").value)
-
-        self.origin_label = self.get_parameter("origin_label").value
-        self.x0 = self.get_parameter("world_origin_x").value
-        self.y0 = self.get_parameter("world_origin_y").value
-        self.sx = self.get_parameter("metres_per_pixel_x").value
-        self.sy = self.get_parameter("metres_per_pixel_y").value
 
         self.image_topic = self.get_parameter("image_topic").value
         self.traversable_prompts = list(self.get_parameter("traversable_prompts").value)
@@ -138,16 +130,9 @@ class SimplePathTranslator(Node):
             self.get_logger().warn("save_debug=true but debug_dir empty; debug saving disabled.")
 
         # ─── Load grid pixel data ─────────────────────────────────────────────
+        # Per-cell pixel centres for label -> world lookups. The anchor pixel itself lives in
+        # coord_transform (kept in sync with this CSV's ORIGIN_LABEL row).
         self.grid_px: Dict[str, np.ndarray] = self._load_grid_csv(grid_csv)
-
-        if self.origin_label in self.grid_px:
-            self.u0, self.v0, _ = self.grid_px[self.origin_label]
-            print(f"Origin '{self.origin_label}' at pixel ({self.u0}, {self.v0})")
-        else:
-            self.u0, self.v0 = 0.0, 0.0
-            self.get_logger().warn(
-                f"Origin label '{self.origin_label}' not found in CSV; using (0,0)."
-            )
 
         # ─── Segmentation + overhead image ────────────────────────────────────
         self.bridge = CvBridge()
@@ -168,18 +153,32 @@ class SimplePathTranslator(Node):
 
         # Cache each robot's latest world (x, y) so every plan can start at the robot's
         # current position. Fed by /<name>/pose_stamped (same pose the controller uses).
+        # node_Odometry_To_Pose publishes it BEST_EFFORT (depth 1), so match that QoS — a
+        # default RELIABLE subscription would never connect and robot_xy would stay None.
+        pose_qos = QoSProfile(depth=1)
+        pose_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self.robot_xy: Dict[str, object] = {name: None for name in self.robot_names}
         for name in self.robot_names:
             self.create_subscription(
-                PoseStamped, f"/{name}/pose_stamped", self._make_pose_cb(name), 10)
+                PoseStamped, f"/{name}/pose_stamped", self._make_pose_cb(name), pose_qos)
 
         self.get_logger().info("✓")
 
     # ------------------------------------------------------------------
     def _make_pose_cb(self, name: str):
-        """Build a /<name>/pose_stamped callback that caches the robot's world (x, y)."""
+        """Build a /<name>/pose_stamped callback that caches the robot's position in THIS
+        node's world frame (same frame as the grid centroids / published waypoints).
+
+        The pose arrives in the Gazebo frame, which is axis-swapped relative to our world
+        frame: gazebo (px, py) -> world (x = py, y = px). This matches control.py's goal/pose
+        pairing and the coord_transform convention (world x from image rows, y from cols).
+        Caching it swapped puts the prepended start point at the robot's true cell instead of
+        off-map (where project_to_free would drop it).
+        """
         def _cb(msg: PoseStamped) -> None:
-            self.robot_xy[name] = (msg.pose.position.x, msg.pose.position.y)
+            # Swap x<->y: the pose is in the Gazebo frame, whose x,y correspond to the
+            # camera/world (image) frame's y,x. gazebo_to_world is the shared single source.
+            self.robot_xy[name] = gazebo_to_world(msg.pose.position.x, msg.pose.position.y)
         return _cb
 
     # ------------------------------------------------------------------
@@ -228,7 +227,7 @@ class SimplePathTranslator(Node):
         on the conversion.
         """
         u, v, _ = pix
-        x, y = pixel_to_world(u, v, self.x0, self.y0, self.sx, self.sy, self.u0, self.v0)
+        x, y = pixel_to_world(u, v)
         return np.array([x, y])
 
     # ──────────────────────────────────────────────────────────────────
@@ -261,8 +260,7 @@ class SimplePathTranslator(Node):
         pix_labels, _ = self.segmenter.classify(
             self.latest_rgb, self.traversable_prompts,
             self.untraversable_prompts, self.threshold)
-        grid, meta = mask_to_occupancy(pix_labels, self.x0, self.y0,
-                                       self.sx, self.sy, self.u0, self.v0, self.resolution)
+        grid, meta = mask_to_occupancy(pix_labels, self.resolution)
         infl = inflate_occupancy(grid, self.resolution, self.inflation_radius)
 
         for name, labels in plans.items():
@@ -287,8 +285,7 @@ class SimplePathTranslator(Node):
         cur_xy = self.robot_xy.get(name)
         if cur_xy is not None:
             centroids.append((float(cur_xy[0]), float(cur_xy[1])))
-            u, v = world_to_pixel(cur_xy[0], cur_xy[1],
-                                  self.x0, self.y0, self.sx, self.sy, self.u0, self.v0)
+            u, v = world_to_pixel(cur_xy[0], cur_xy[1])
             sel_pixels.append((float(u), float(v)))
         else:
             self.get_logger().warn(
@@ -339,6 +336,13 @@ class SimplePathTranslator(Node):
             wx, wy = cell_to_world(gx, gy, meta)
             flat_xy += [float(wx), float(wy)]
 
+        # Start the published route at the robot's ACTUAL position (unsnapped). A* had to start
+        # from the nearest FREE cell — the robot's own cell reads as an obstacle in the overhead
+        # image — but the route the controller follows should begin exactly where the robot is,
+        # so replace that first projected point with the true pose.
+        if cur_xy is not None and len(flat_xy) >= 2:
+            flat_xy[0], flat_xy[1] = float(cur_xy[0]), float(cur_xy[1])
+
         arr = Float32MultiArray()
         arr.data = flat_xy
         self.world_pubs[name].publish(arr)
@@ -348,12 +352,14 @@ class SimplePathTranslator(Node):
 
         if self.save_debug and self.debug_dir and self.latest_rgb is not None:
             try:
-                self._save_debug(pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta, suffix=name)
+                self._save_debug(pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta,
+                                 start_world=cur_xy, suffix=name)
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 
     # ------------------------------------------------------------------
-    def _save_debug(self, pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta, suffix: str = "") -> None:
+    def _save_debug(self, pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta,
+                    start_world=None, suffix: str = "") -> None:
         """Write the debug artifacts to self.debug_dir (overwrite in place).
 
         When suffix (a robot name) is given, artifacts go in a per-robot subdirectory so the
@@ -394,25 +400,28 @@ class SimplePathTranslator(Node):
         cv2.imwrite(os.path.join(d, "route_centroids.png"), rc)
 
         # 4) obstacle-avoiding planned route (world -> pixel, green line). Dots are colored by
-        #    category: gold = robot start, red = projected centroid (an anchor), yellow = the
-        #    intermediate A* waypoints filling the segments between anchors.
+        #    category: red = projected centroid / A* start cell (an anchor), yellow = the
+        #    intermediate A* waypoints. The robot's ACTUAL (unsnapped) start is drawn separately
+        #    as a magenta dot on top — that is where the route really begins.
         rp = base.copy()
         ppx = []
         for (gx, gy) in full_cells:
             wx, wy = cell_to_world(gx, gy, meta)
-            u, v = world_to_pixel(wx, wy, self.x0, self.y0, self.sx, self.sy, self.u0, self.v0)
+            u, v = world_to_pixel(wx, wy)
             ppx.append((int(u), int(v)))
         for a, b in zip(ppx, ppx[1:]):
             cv2.line(rp, a, b, (0, 200, 0), 2)
         anchor_set = {(int(a[0]), int(a[1])) for a in anchors}
-        for idx, (cell, p) in enumerate(zip(full_cells, ppx)):
-            if idx == 0:
-                color = (0, 215, 255)        # gold = robot start (BGR)
-            elif (int(cell[0]), int(cell[1])) in anchor_set:
-                color = (0, 0, 255)          # red = projected centroid
+        for (cell, p) in zip(full_cells, ppx):
+            if (int(cell[0]), int(cell[1])) in anchor_set:
+                color = (0, 0, 255)          # red = projected centroid / A* start (BGR)
             else:
                 color = (0, 255, 255)        # yellow = intermediate waypoint
             cv2.circle(rp, p, 5, color, -1)
+        # Robot's true, unsnapped start position (the path is published from here).
+        if start_world is not None:
+            su, sv = world_to_pixel(start_world[0], start_world[1])
+            cv2.circle(rp, (int(su), int(sv)), 6, (255, 0, 255), -1)   # magenta = robot start
         cv2.imwrite(os.path.join(d, "route_planned.png"), rp)
 
         # 5,6) occupancy maps (white=free, black=occupied, gray=unknown).
@@ -435,7 +444,7 @@ class SimplePathTranslator(Node):
         # true obstacle). Pixel-space, so it lines up with the overhead image directly.
         h_img, w_img = base.shape[:2]
         uu, vv = np.meshgrid(np.arange(w_img), np.arange(h_img))
-        xs, ys = pixel_to_world(uu, vv, self.x0, self.y0, self.sx, self.sy, self.u0, self.v0)
+        xs, ys = pixel_to_world(uu, vv)
         gx = np.floor((xs - meta["origin_x"]) / meta["resolution"]).astype(np.int64)
         gy = np.floor((ys - meta["origin_y"]) / meta["resolution"]).astype(np.int64)
         inb = (gx >= 0) & (gx < meta["width"]) & (gy >= 0) & (gy < meta["height"])

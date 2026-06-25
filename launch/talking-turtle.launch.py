@@ -216,10 +216,6 @@ def generate_launch_description():
             {'circle_radius': 16},
             {'world_path_color': [200, 200, 200]},  # Light gray for reference path
             {'robot_color': [255, 0, 255]},  # Magenta for robot
-            {'world_origin_x': 0.0},
-            {'world_origin_y': 5.5},
-            {'metres_per_pixel_x': 1.0 / 138.0},
-            {'metres_per_pixel_y': -1.0 / 152.0},
             {'robot_names': [bot_name, bot2_name]},
         ],
         remappings=[
