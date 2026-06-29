@@ -4,6 +4,7 @@ from launch.actions import GroupAction, DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from dotenv import load_dotenv
 from ament_index_python.packages import get_package_share_directory
 
@@ -40,6 +41,9 @@ def generate_launch_description():
                 {'openai_api_key': api_key},
                 {'map_path': map_file},
                 {'robot_names': [bot_name, bot2_name]},
+                {'replan_mode': LaunchConfiguration('replan_mode')},
+                {'replan_period': ParameterValue(
+                    LaunchConfiguration('replan_period'), value_type=float)},
             ],
         ),
     ])
@@ -228,6 +232,13 @@ def generate_launch_description():
             'use_audio', default_value='false',
             description='Launch the audio nodes (node_Speech_Gen TTS + node_Listener STT). '
                         'Requires the sounddevice package; default false.'),
+        DeclareLaunchArgument(
+            'replan_mode', default_value='static',
+            description='Executive replanning strategy: "static" (plan once per prompt) or '
+                        '"dynamic" (re-plan the same prompt every replan_period seconds).'),
+        DeclareLaunchArgument(
+            'replan_period', default_value='15.0',
+            description='Seconds between dynamic replans (used only when replan_mode:=dynamic).'),
         exec_api_node,
         triage_api_node,
         control_node,

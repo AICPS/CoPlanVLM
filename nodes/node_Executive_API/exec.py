@@ -50,16 +50,25 @@ class ExecutiveApiNode(Node):
         self.declare_parameter('need_map_topic', '/need_map')   # ⇐ output
         self.declare_parameter('map_path', '')
         self.declare_parameter('robot_names', ['raph', 'raph2'])  # roster the planner must cover
+        self.declare_parameter('temperature', 0.0)               # 0 = deterministic
+        # Replanning strategy: "static" plans once per prompt; "dynamic" re-runs the same prompt
+        # at replan_period seconds until a new prompt arrives. Future modes (event-driven, …) add
+        # their own trigger that also calls _run_plan() — the VLM call body is never duplicated.
+        self.declare_parameter('replan_mode', 'static')          # "static" | "dynamic"
+        self.declare_parameter('replan_period', 15.0)            # seconds between dynamic replans
 
 
         self.robot_names: list[str] = list(self.get_parameter('robot_names').value)
         self.api_key: str   = self.get_parameter('openai_api_key').value
         self.model: str     = self.get_parameter('model').value
+        self.temperature: float = self.get_parameter('temperature').value
         self.nav_prompt_topic: str = self.get_parameter('nav_prompt_topic').value
         self.exec_path_topic: str   = self.get_parameter('exec_path_topic').value
         self.exec_status_topic: str = self.get_parameter('exec_status_topic').value
         self.need_map_topic: str = self.get_parameter('need_map_topic').value
         self.map_path: str   = self.get_parameter('map_path').value
+        self.replan_mode: str = self.get_parameter('replan_mode').value
+        self.replan_period: float = float(self.get_parameter('replan_period').value)
 
 
         # ---------- OpenAI client ----------
@@ -75,6 +84,23 @@ class ExecutiveApiNode(Node):
             String, self.nav_prompt_topic, self.prompt_callback, 10
         )
 
+        # ---------- Replan trigger state ----------
+        # current_prompt holds the latest operator goal (already suffixed with '\n\njson'); the
+        # dynamic-mode timer re-plans against whatever this currently holds, so "replan unless the
+        # prompt changed" needs no extra bookkeeping — a new prompt simply overwrites it.
+        self.current_prompt: str | None = None
+        self._timer = None
+        if self.replan_mode not in ('static', 'dynamic'):
+            self.get_logger().warn(
+                f"Unknown replan_mode '{self.replan_mode}'; defaulting to 'static'.")
+            self.replan_mode = 'static'
+        if self.replan_mode == 'dynamic':
+            self._timer = self.create_timer(self.replan_period, self._on_timer)
+            self.get_logger().info(
+                f"[exec] dynamic replanning every {self.replan_period:.1f}s")
+        else:
+            self.get_logger().info("[exec] static planning (one plan per prompt)")
+
         self.get_logger().info("✓")
 
         
@@ -82,13 +108,44 @@ class ExecutiveApiNode(Node):
     # Callback: handle incoming prompt and plan
     # ------------------------------------------------------------------
     def prompt_callback(self, msg: String) -> None:
+        """Store the new goal and plan once immediately.
+
+        Thin trigger: the actual VLM planning lives in _run_plan(). In dynamic mode the timer
+        re-runs _run_plan() on the stored prompt at a fixed period; here we (re)start that timer so
+        the period is measured from the latest prompt.
+        """
         self.get_logger().info(f"[exec] received /nav/prompt: {msg.data!r}")
-        self.prompt = msg.data + '\n\njson'
+        self.current_prompt = msg.data + '\n\njson'
+
+        if self.replan_mode == 'dynamic' and self._timer is not None:
+            self._timer.reset()  # restart the period from this prompt
+
+        self._run_plan()
+
+    # ------------------------------------------------------------------
+    # Timer callback: dynamic-mode periodic replan
+    # ------------------------------------------------------------------
+    def _on_timer(self) -> None:
+        """Re-plan against the current prompt. No-op until a prompt has been received."""
+        if self.current_prompt is None:
+            return
+        self.get_logger().info("[exec] dynamic replan tick")
+        self._run_plan()
+
+    # ------------------------------------------------------------------
+    # Core: build snapshot, call the VLM, publish /grid_path + status
+    # ------------------------------------------------------------------
+    def _run_plan(self) -> None:
+        if self.current_prompt is None:
+            return
 
         if not self.api_key:
             self._publish_status(False, 'API key missing')
             return
 
+        # NOTE: single-threaded executor — the sleep(5) + VLM call below blocks this node's
+        # callbacks (incl. /nav/prompt) until it returns. A timer cannot re-enter while a plan is
+        # in flight, so replans never overlap. Acceptable for this use.
         try:
             self._need_map_pub(True)
             sleep(5)
@@ -96,6 +153,7 @@ class ExecutiveApiNode(Node):
 
             response = self.client.responses.create(
                 model=self.model,
+                temperature=self.temperature,
                 instructions=EXECUTIVE_SYSTEM_PROMPT,
                 # --- Switched to the in-repo prompt (node_Executive_API/prompt.py). ---
                 # PREVIOUSLY ACTIVE server-stored prompt (uncomment to restore exactly):
@@ -107,7 +165,7 @@ class ExecutiveApiNode(Node):
                     {
                         "role": "user",
                         "content": [
-                            { "type": "input_text", "text": self.prompt },
+                            { "type": "input_text", "text": self.current_prompt },
                             {
                                 "type": "input_image",
                                 "image_url": f"data:image/png;base64,{self.map}",

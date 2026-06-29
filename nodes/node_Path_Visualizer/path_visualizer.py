@@ -50,6 +50,9 @@ class PathVisualizer(Node):
         self.display_scale = float(self.get_parameter("display_scale").value)
         self.line_thickness = int(self.get_parameter("line_thickness").value)
         self.circle_radius = int(self.get_parameter("circle_radius").value)
+        # Perpendicular spacing (px) between robots' planned paths so coincident routes render as
+        # parallel tracks instead of one hiding the other. 0 disables the offset.
+        self.path_offset_px = float(self.get_parameter("path_offset_px").value)
 
         self.start_color = tuple(int(c) for c in self.get_parameter("start_color").value)
         self.path_color = tuple(int(c) for c in self.get_parameter("path_color").value)
@@ -128,6 +131,7 @@ class PathVisualizer(Node):
         self.declare_parameter("display_scale", 0.5)
         self.declare_parameter("line_thickness", 6)
         self.declare_parameter("circle_radius", 14)
+        self.declare_parameter("path_offset_px", 10.0)
 
         self.declare_parameter("start_color", [0, 255, 0])
         self.declare_parameter("path_color", [165, 33, 0])
@@ -219,6 +223,39 @@ class PathVisualizer(Node):
             pixels.append((int(round(uv[0])), int(round(uv[1]))))
         return pixels
 
+    @staticmethod
+    def _offset_polyline(pts: List[Tuple[int, int]], offset: float) -> List[Tuple[int, int]]:
+        """Shift each vertex perpendicular to the local path direction by `offset` px.
+
+        Used to separate different robots' planned paths so coincident routes draw as parallel
+        tracks rather than one painting over the other. The normal at each vertex uses the
+        averaged direction of its adjacent segments for a smooth offset.
+        """
+        n = len(pts)
+        if offset == 0.0 or n < 2:
+            return list(pts)
+        out: List[Tuple[int, int]] = []
+        for i in range(n):
+            if i == 0:
+                dx, dy = pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]
+            elif i == n - 1:
+                dx, dy = pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]
+            else:
+                dx, dy = pts[i + 1][0] - pts[i - 1][0], pts[i + 1][1] - pts[i - 1][1]
+            length = math.hypot(dx, dy)
+            if length < 1e-9:
+                out.append((int(round(pts[i][0])), int(round(pts[i][1]))))
+                continue
+            nx, ny = -dy / length, dx / length          # unit normal (perpendicular)
+            out.append((int(round(pts[i][0] + nx * offset)),
+                        int(round(pts[i][1] + ny * offset))))
+        return out
+
+    def _robot_offset(self, index: int) -> float:
+        """Symmetric per-robot perpendicular offset so paths straddle the true route evenly."""
+        n = len(self.robot_names)
+        return (index - (n - 1) / 2.0) * self.path_offset_px
+
     def _world_to_pixel(self, x_world: float, y_world: float) -> Tuple[int, int]:
         # Calibration owned by coord_transform; this wrapper just rounds to int pixels for cv2.
         u, v = world_to_pixel(x_world, y_world)
@@ -302,8 +339,9 @@ class PathVisualizer(Node):
             return
 
         image = self.captured_map.copy()
-        for name in self.robot_names:
+        for i, name in enumerate(self.robot_names):
             path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
+            path_pixels = self._offset_polyline(path_pixels, self._robot_offset(i))
             self._draw_grid_path(image, path_pixels, self.robot_colors[name], name)
 
         try:
@@ -345,16 +383,20 @@ class PathVisualizer(Node):
 
         frame = self.latest_raw_map.copy()
 
-        for name in self.robot_names:
+        for idx, name in enumerate(self.robot_names):
             color = self.robot_colors[name]
+            # Perpendicular offset so robots' planned paths stay visible where they coincide.
+            offset = self._robot_offset(idx)
 
             # Waypoint path from /<name>/waypoint_path (metres -> pixels), in the robot's color.
             world_pixels = [self._world_to_pixel(x, y) for x, y in self.latest_world_path[name]]
+            world_pixels = self._offset_polyline(world_pixels, offset)
             for i in range(len(world_pixels) - 1):
                 cv2.line(frame, world_pixels[i], world_pixels[i + 1], color, 2)
 
             # VLM grid-label path from /grid_path as colored arrows.
             path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
+            path_pixels = self._offset_polyline(path_pixels, offset)
             self._draw_grid_path(frame, path_pixels, color, name)
 
             # Actual measured trajectory trail (history of poses), drawn DASHED in the robot's

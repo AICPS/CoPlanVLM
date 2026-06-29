@@ -1,43 +1,19 @@
 #!/usr/bin/env python3
 """
-simple_path_translator.py  –  v0.5 (straight‑down camera, explicit Z scale)
--------------------------------------------------------------------------
-ROS 2 node that converts a JSON list of grid labels (e.g. ["L1", "M2"]) sent
-on `/grid_path` into ground‑plane metres and publishes each robot's route on
-`/<robot>/waypoint_path` as a `Float32MultiArray`.
+simple_path_translator.py — ROS 2 entry point for grid-label -> metric path planning.
 
-**What changed in v0.5**
------------------------
-Field testing showed the intrinsics YAML still contains the *real* focal lengths
-(`fx`, `fy`) rather than `fx/Z`, `fy/Z`. Therefore we restore the explicit
-multiplication by the known plane height **Z** (parameter `plane_height_m`,
-default ≈ 4.27 m ≃ 14 ft).
+Subscribes to `/grid_path` (a JSON object {robot_name: [grid labels]}), builds an occupancy grid
+once per message from the latest overhead frame, turns each robot's labels into a world-frame
+reference route (robot pose prepended), and DELEGATES the actual path computation to a selectable
+planner module:
 
-Equation
-```
-[u, v, 1]^T           pixel centre (homogeneous)
-           K⁻¹
-[x_n, y_n, 1]         normalised image coords (unit‑less)
-× Z                   known plane height (metres)
-[X_m, Y_m]            camera‑frame metres on the ground plane
-```
-Sign flips (`pixel_sign_x / pixel_sign_y`) are then applied so you can align the
-final axes with the robot frame without rewriting CSV or YAML files.
+    planner:=chomp  (default) -> chomp_proj : CHOMP trajectory optimization over an SDF
+    planner:=astar            -> astar_proj : project-to-free + pairwise A* + LOS thinning
 
-Usage example
--------------
-```bash
-ros2 run talking_turtle simple_path_translator --ros-args \
-  -p grid_csv:=/abs/path/to/grid.csv \
-  -p intrinsics_yaml:=/abs/path/to/intrinsics.yaml \
-  -p label_column:=cell \
-  -p u_column:=center_x \
-  -p v_column:=center_y \
-  -p plane_height_m:=4.27            # camera ≈ 14 ft above grid
-  # optional sign flips:
-  -p pixel_sign_x:=-1.0 \
-  -p pixel_sign_y:=-1.0
-```
+Each planner exposes build(grid, meta, params) / plan(reference_xy, ctx, meta, params) /
+save_debug(...). This node keeps everything ROS-specific (I/O, pose caching, the shared
+occupancy/segmentation debug images) and stays thin; the algorithms live in the planner modules.
+Each robot's result is published as a Float32MultiArray [x1,y1,x2,y2,...] on /<robot>/waypoint_path.
 """
 from __future__ import annotations
 
@@ -57,23 +33,23 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
-import yaml
 
-from coord_transform import pixel_to_world, world_to_pixel, gazebo_to_world
+from coord_transform import gazebo_to_world
 from obs_seg import FREE, OCCUPIED, UNKNOWN
 from obs_seg.segmenter import TraversabilitySegmenter
-from obs_seg.occupancy import (mask_to_occupancy, inflate_occupancy,
-                               world_to_cell, cell_to_world)
-from grid_planner import project_to_free, astar, simplify_path_los
+from obs_seg.occupancy import mask_to_occupancy
+
+from . import astar_proj, chomp_proj
+from .chomp_proj import PARAMS as CHOMP_PARAMS
+from .astar_proj import PARAMS as ASTAR_PARAMS
+
+_PLANNERS = {"astar": astar_proj, "chomp": chomp_proj}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 class SimplePathTranslator(Node):
-    """Pixel‑label → metre waypoint translator for a downward‑facing camera."""
+    """Pixel-label -> metre waypoint translator; delegates planning to a planner module."""
 
-    # ────────────────────────────────
-    #  Initialise node and resources
-    # ────────────────────────────────
     def __init__(self):
         super().__init__("simple_path_translator")
 
@@ -86,18 +62,19 @@ class SimplePathTranslator(Node):
         # One robot per entry; each robot's plan is published to /<name>/waypoint_path.
         self.declare_parameter("robot_names", ["raph", "raph2"])
 
-        # Pixel<->world calibration (anchor cell + scale) lives entirely in coord_transform;
-        # nothing about it is declared here.
-
         # ─── Obstacle-aware planning params ───────────────────────────────────
         self.declare_parameter("image_topic", "/ids_overhead/image")
         self.declare_parameter("traversable_prompts", ["the floor"])
         self.declare_parameter("untraversable_prompts", [""])   # "" entries filtered out
         self.declare_parameter("threshold", 0.48)
         self.declare_parameter("resolution", 0.05)              # m / occupancy cell
-        self.declare_parameter("inflation_radius", 0.5)         # m (TurtleBot4 radius ~0.17 + margin)
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
+
+        # ─── Planner selection + CHOMP/A* knobs ──────────────────────────────
+        self.declare_parameter("planner", "astar")               # "chomp" | "astar"
+        for k, v in {**CHOMP_PARAMS, **ASTAR_PARAMS}.items():
+            self.declare_parameter(k, v)
 
         # ─── Read parameters once ─────────────────────────────────────────────
         grid_csv       = self.get_parameter("grid_csv").get_parameter_value().string_value
@@ -112,10 +89,21 @@ class SimplePathTranslator(Node):
         self.untraversable_prompts = [p for p in self.get_parameter("untraversable_prompts").value if p]
         self.threshold = self.get_parameter("threshold").value
         self.resolution = self.get_parameter("resolution").value
-        self.inflation_radius = self.get_parameter("inflation_radius").value
 
         self.save_debug = self.get_parameter("save_debug").value
         self.debug_dir = self.get_parameter("debug_dir").value
+
+        # Pick the planner module (default chomp). All tunables are gathered into one dict that
+        # is passed to the planner's build/plan/save_debug.
+        self.planner_name = self.get_parameter("planner").value
+        self.planner = _PLANNERS.get(self.planner_name)
+        if self.planner is None:
+            self.get_logger().warn(f"Unknown planner '{self.planner_name}'; defaulting to chomp.")
+            self.planner_name, self.planner = "chomp", chomp_proj
+        self.plan_params = {k: self.get_parameter(k).value for k in {**CHOMP_PARAMS, **ASTAR_PARAMS}}
+        self.get_logger().info(f"Planner: {self.planner_name}")
+
+        # ─── Debug grid overlay (shared) ──────────────────────────────────────
         self._grid_overlay = None
         if self.save_debug and self.debug_dir:
             os.makedirs(self.debug_dir, exist_ok=True)
@@ -130,8 +118,8 @@ class SimplePathTranslator(Node):
             self.get_logger().warn("save_debug=true but debug_dir empty; debug saving disabled.")
 
         # ─── Load grid pixel data ─────────────────────────────────────────────
-        # Per-cell pixel centres for label -> world lookups. The anchor pixel itself lives in
-        # coord_transform (kept in sync with this CSV's ORIGIN_LABEL row).
+        # Per-cell pixel centres for label -> world lookups (the pixel<->world calibration itself
+        # lives in coord_transform).
         self.grid_px: Dict[str, np.ndarray] = self._load_grid_csv(grid_csv)
 
         # ─── Segmentation + overhead image ────────────────────────────────────
@@ -141,20 +129,15 @@ class SimplePathTranslator(Node):
         self.segmenter = TraversabilitySegmenter()
 
         # ─── ROS 2 I/O ────────────────────────────────────────────────────────
-        # /ids_overhead/image is the Gazebo->ROS bridge topic; cache the latest frame
-        # (depth-1, default QoS, matching node_Map_Gen / node_Path_Visualizer).
         self.create_subscription(Image, self.image_topic, self._on_image, 1)
         self.sub = self.create_subscription(String, path_topic, self._on_path_msg, 10)
-        # One waypoint-path publisher per robot: /<name>/waypoint_path.
         self.world_pubs: Dict[str, object] = {
             name: self.create_publisher(Float32MultiArray, f"/{name}/waypoint_path", 10)
             for name in self.robot_names
         }
 
-        # Cache each robot's latest world (x, y) so every plan can start at the robot's
-        # current position. Fed by /<name>/pose_stamped (same pose the controller uses).
-        # node_Odometry_To_Pose publishes it BEST_EFFORT (depth 1), so match that QoS — a
-        # default RELIABLE subscription would never connect and robot_xy would stay None.
+        # Cache each robot's latest world (x, y) so every plan starts at the robot's current
+        # position. /<name>/pose_stamped is published BEST_EFFORT, so match that QoS.
         pose_qos = QoSProfile(depth=1)
         pose_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self.robot_xy: Dict[str, object] = {name: None for name in self.robot_names}
@@ -166,18 +149,8 @@ class SimplePathTranslator(Node):
 
     # ------------------------------------------------------------------
     def _make_pose_cb(self, name: str):
-        """Build a /<name>/pose_stamped callback that caches the robot's position in THIS
-        node's world frame (same frame as the grid centroids / published waypoints).
-
-        The pose arrives in the Gazebo frame, which is axis-swapped relative to our world
-        frame: gazebo (px, py) -> world (x = py, y = px). This matches control.py's goal/pose
-        pairing and the coord_transform convention (world x from image rows, y from cols).
-        Caching it swapped puts the prepended start point at the robot's true cell instead of
-        off-map (where project_to_free would drop it).
-        """
+        """Cache the robot's position in the world frame (Gazebo pose swapped via gazebo_to_world)."""
         def _cb(msg: PoseStamped) -> None:
-            # Swap x<->y: the pose is in the Gazebo frame, whose x,y correspond to the
-            # camera/world (image) frame's y,x. gazebo_to_world is the shared single source.
             self.robot_xy[name] = gazebo_to_world(msg.pose.position.x, msg.pose.position.y)
         return _cb
 
@@ -189,11 +162,9 @@ class SimplePathTranslator(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f"Failed to decode overhead image: {exc}")
 
-    # ──────────────────────────────────────────────────────────────────
-    #  Helpers
-    # ──────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     def _load_grid_csv(self, csv_path: str) -> Dict[str, np.ndarray]:
-        """Read CSV and build {label: [u,v,1]} dict."""
+        """Read CSV and build {label: [u, v, 1]} dict."""
         centres: Dict[str, np.ndarray] = {}
         p = Path(csv_path)
         if not p.exists():
@@ -210,8 +181,7 @@ class SimplePathTranslator(Node):
                 except KeyError:
                     self.get_logger().error(
                         "CSV missing one of the required columns "
-                        f"({self.lbl_col}, {self.u_col}, {self.v_col})."
-                    )
+                        f"({self.lbl_col}, {self.u_col}, {self.v_col}).")
                     break
                 except ValueError:
                     self.get_logger().warn(f"Skipping malformed row: {row}")
@@ -219,30 +189,39 @@ class SimplePathTranslator(Node):
         return centres
 
     # ------------------------------------------------------------------
-    def _pixel_to_world(self, pix: np.ndarray) -> np.ndarray:
-        """Convert image pixel (u,v) → world (x,y) in metres.
+    def _build_reference(self, name, labels):
+        """Robot pose (if known) + label centroids -> world reference route. Returns (ref, cur_xy).
 
-        Thin wrapper around the shared coord_transform.pixel_to_world so the
-        translator and the occupancy-map generator (obs_seg) can never disagree
-        on the conversion.
+        Delegates label->world conversion to astar_proj.build_reference — the single shared
+        implementation used by both this node and test_pipeline.py.
         """
-        u, v, _ = pix
-        x, y = pixel_to_world(u, v)
-        return np.array([x, y])
+        cur_xy = self.robot_xy.get(name)
+        if cur_xy is None:
+            self.get_logger().warn(
+                f"[{name}] No current pose yet; route will start at the first label.")
+        ref, unknown = astar_proj.build_reference(labels, cur_xy, self.grid_px)
+        for lbl in unknown:
+            self.get_logger().warn(f"[{name}] Unknown label '{lbl}' – skipping.")
+        return ref, cur_xy
+
+    # ------------------------------------------------------------------
+    def _publish(self, name, world_path, cur_xy) -> None:
+        """Publish a world path as Float32MultiArray [x1,y1,...], starting at the actual pose."""
+        flat: List[float] = []
+        for (x, y) in world_path:
+            flat += [float(x), float(y)]
+        # The controller's route should begin exactly where the robot is.
+        if cur_xy is not None and len(flat) >= 2:
+            flat[0], flat[1] = float(cur_xy[0]), float(cur_xy[1])
+        arr = Float32MultiArray()
+        arr.data = flat
+        self.world_pubs[name].publish(arr)
 
     # ──────────────────────────────────────────────────────────────────
     #  Subscription callback
     # ──────────────────────────────────────────────────────────────────
     def _on_path_msg(self, msg: String) -> None:
-        """Plan a collision-free path for each robot named in the incoming message.
-
-        msg.data is a JSON object {robot_name: [grid labels]}. On every new plan message the
-        inflated costmap is rebuilt fresh from the latest overhead frame, then reused for all
-        robots in THAT message (the segmentation is the expensive step and both robots see the
-        same instant, so re-segmenting per robot would be wasteful). Each robot's labels are
-        turned into world centroids -> projected onto free space -> pairwise A* -> per-segment
-        line-of-sight thinning, and published to /<robot>/waypoint_path.
-        """
+        """Plan a path for each robot named in the /grid_path message via the selected planner."""
         try:
             plans = json.loads(msg.data)
             assert isinstance(plans, dict)
@@ -255,13 +234,13 @@ class SimplePathTranslator(Node):
             self.get_logger().warn("No overhead image received yet — cannot plan. Skipping.")
             return
 
-        # Rebuild the inflated costmap from the latest frame for this replan, then reuse it
-        # across the robots in this message.
+        # Build the occupancy grid once from the latest frame, then the planner's costmap (infl
+        # for A*, SDF for CHOMP) once; both are reused across the robots in this message.
         pix_labels, _ = self.segmenter.classify(
             self.latest_rgb, self.traversable_prompts,
             self.untraversable_prompts, self.threshold)
         grid, meta = mask_to_occupancy(pix_labels, self.resolution)
-        infl = inflate_occupancy(grid, self.resolution, self.inflation_radius)
+        ctx = self.planner.build(grid, meta, self.plan_params)
 
         for name, labels in plans.items():
             if name not in self.world_pubs:
@@ -271,116 +250,50 @@ class SimplePathTranslator(Node):
             if not isinstance(labels, list):
                 self.get_logger().warn(f"[{name}] Route is not a list; skipping.")
                 continue
-            self._plan_one(name, labels, pix_labels, grid, infl, meta)
+
+            ref, cur_xy = self._build_reference(name, labels)
+            if not ref:
+                self.get_logger().warn(f"[{name}] No valid waypoints in route; nothing to plan.")
+                continue
+
+            world_path, dbg = self.planner.plan(ref, ctx, meta, self.plan_params)
+            for w in dbg.get("warnings", []):
+                self.get_logger().warn(f"[{name}] {w}")
+            if not world_path:
+                self.get_logger().warn(f"[{name}] planner produced no path; skipping.")
+                continue
+
+            self._publish(name, world_path, cur_xy)
+            self.get_logger().info(
+                f"[{name}] Planned path: {len(world_path)} waypoints "
+                f"(grid {meta['width']}x{meta['height']} @ {meta['resolution']} m, "
+                f"planner={self.planner_name}).")
+
+            if self.save_debug and self.debug_dir and self.latest_rgb is not None:
+                try:
+                    out_dir = os.path.join(self.debug_dir, name)
+                    os.makedirs(out_dir, exist_ok=True)
+                    base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
+                    self._save_common_debug(out_dir, base, pix_labels, grid)
+                    dbg["start_world"] = cur_xy
+                    self.planner.save_debug(out_dir, base, grid, meta, ctx, dbg, self.plan_params)
+                except Exception as exc:  # noqa: BLE001
+                    self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 
     # ------------------------------------------------------------------
-    def _plan_one(self, name, labels, pix_labels, grid, infl, meta) -> None:
-        """Plan one robot's route on the prebuilt costmap and publish /<name>/waypoint_path."""
-        # 1) labels -> world centroids (also remember pixel positions for debug overlays)
-        centroids: List[tuple] = []
-        sel_pixels: List[tuple] = []
+    def _save_common_debug(self, out_dir, base, pix_labels, grid) -> None:
+        """Shared (method-agnostic) debug: raw overhead, segmentation, grid overlay, occupancy."""
+        cv2.imwrite(os.path.join(out_dir, "raw_overhead.png"), base)
 
-        # Always start the route at the robot's current position so the path leads from where
-        # the robot actually is (prepended before projection + pairwise A*).
-        cur_xy = self.robot_xy.get(name)
-        if cur_xy is not None:
-            centroids.append((float(cur_xy[0]), float(cur_xy[1])))
-            u, v = world_to_pixel(cur_xy[0], cur_xy[1])
-            sel_pixels.append((float(u), float(v)))
-        else:
-            self.get_logger().warn(
-                f"[{name}] No current pose yet; starting route at first label instead.")
-
-        for label in labels:
-            if label not in self.grid_px:
-                self.get_logger().warn(f"[{name}] Unknown label '{label}' – skipping.")
-                continue
-            u, v, _ = self.grid_px[label]
-            sel_pixels.append((float(u), float(v)))
-            x, y = self._pixel_to_world(self.grid_px[label])
-            centroids.append((float(x), float(y)))
-        if not centroids:
-            self.get_logger().warn(f"[{name}] No valid waypoints in route; nothing to plan.")
-            return
-
-        # 2) project each centroid onto the nearest free cell
-        anchors: List[tuple] = []
-        for (x, y) in centroids:
-            free_cell = project_to_free(infl, world_to_cell(x, y, meta))
-            if free_cell is None:
-                self.get_logger().warn(
-                    f"[{name}] Waypoint ({x:.2f},{y:.2f}) has no free cell nearby; skipping.")
-                continue
-            anchors.append(free_cell)
-        if not anchors:
-            self.get_logger().warn(f"[{name}] No projectable waypoints; nothing to publish.")
-            return
-
-        # 3) pairwise A* + per-segment LOS thinning (anchors preserved).
-        #    On a pathless segment, skip that anchor and continue from the last reached one.
-        full_cells: List[tuple] = [anchors[0]]
-        current = anchors[0]
-        for nxt in anchors[1:]:
-            seg = astar(infl, current, nxt)
-            if seg is None:
-                self.get_logger().warn(
-                    f"[{name}] No A* path from {current} to {nxt}; skipping waypoint.")
-                continue
-            seg = simplify_path_los(infl, seg)
-            full_cells.extend(seg[1:])      # drop duplicate shared endpoint
-            current = nxt
-
-        # 4) cells -> world -> publish to this robot's topic
-        flat_xy: List[float] = []
-        for (gx, gy) in full_cells:
-            wx, wy = cell_to_world(gx, gy, meta)
-            flat_xy += [float(wx), float(wy)]
-
-        # Start the published route at the robot's ACTUAL position (unsnapped). A* had to start
-        # from the nearest FREE cell — the robot's own cell reads as an obstacle in the overhead
-        # image — but the route the controller follows should begin exactly where the robot is,
-        # so replace that first projected point with the true pose.
-        if cur_xy is not None and len(flat_xy) >= 2:
-            flat_xy[0], flat_xy[1] = float(cur_xy[0]), float(cur_xy[1])
-
-        arr = Float32MultiArray()
-        arr.data = flat_xy
-        self.world_pubs[name].publish(arr)
-        self.get_logger().info(
-            f"[{name}] Planned path: {len(anchors)} anchors -> {len(full_cells)} waypoints "
-            f"(grid {meta['width']}x{meta['height']} @ {meta['resolution']} m).")
-
-        if self.save_debug and self.debug_dir and self.latest_rgb is not None:
-            try:
-                self._save_debug(pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta,
-                                 start_world=cur_xy, suffix=name)
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
-
-    # ------------------------------------------------------------------
-    def _save_debug(self, pix_labels, sel_pixels, full_cells, anchors, grid, infl, meta,
-                    start_world=None, suffix: str = "") -> None:
-        """Write the debug artifacts to self.debug_dir (overwrite in place).
-
-        When suffix (a robot name) is given, artifacts go in a per-robot subdirectory so the
-        robots planned from one /grid_path message don't overwrite each other's overlays.
-        """
-        d = os.path.join(self.debug_dir, suffix) if suffix else self.debug_dir
-        os.makedirs(d, exist_ok=True)
-        base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(d, "raw_overhead.png"), base)
-
-        # CLIPSeg segmentation result, as a colored overlay on the overhead frame.
-        # pix_labels is the same shape as the image, so this is already in camera
-        # orientation (no transpose needed). green=free, red=obstacle, gray=unknown.
+        # CLIPSeg segmentation overlay (green=free, red=obstacle, gray=unknown).
         seg_color = np.zeros_like(base)
         seg_color[pix_labels == FREE] = (0, 180, 0)
         seg_color[pix_labels == OCCUPIED] = (0, 0, 200)
         seg_color[pix_labels == UNKNOWN] = (128, 128, 128)
-        seg_overlay = (0.5 * base + 0.5 * seg_color).astype(np.uint8)
-        cv2.imwrite(os.path.join(d, "segmentation.png"), seg_overlay)
+        cv2.imwrite(os.path.join(out_dir, "segmentation.png"),
+                    (0.5 * base + 0.5 * seg_color).astype(np.uint8))
 
-        # 2) raw + transparent grid overlay (what the VLM sees)
+        # Raw + transparent grid overlay (what the VLM sees).
         if self._grid_overlay is not None:
             g = cv2.resize(self._grid_overlay, (base.shape[1], base.shape[0]))
             if g.ndim == 3 and g.shape[2] == 4:
@@ -388,81 +301,18 @@ class SimplePathTranslator(Node):
                 comp = (base * (1 - a) + g[..., :3] * a).astype(np.uint8)
             else:
                 comp = g[..., :3]
-            cv2.imwrite(os.path.join(d, "grid_overlay.png"), comp)
+            cv2.imwrite(os.path.join(out_dir, "grid_overlay.png"), comp)
 
-        # 3) naive route through the selected region centroids (pixel space, orange)
-        rc = base.copy()
-        pts = [(int(u), int(v)) for (u, v) in sel_pixels]
-        for a, b in zip(pts, pts[1:]):
-            cv2.line(rc, a, b, (0, 165, 255), 2)
-        for p in pts:
-            cv2.circle(rc, p, 8, (255, 0, 0), -1)        # blue = centroid
-        cv2.imwrite(os.path.join(d, "route_centroids.png"), rc)
-
-        # 4) obstacle-avoiding planned route (world -> pixel, green line). Dots are colored by
-        #    category: red = projected centroid / A* start cell (an anchor), yellow = the
-        #    intermediate A* waypoints. The robot's ACTUAL (unsnapped) start is drawn separately
-        #    as a magenta dot on top — that is where the route really begins.
-        rp = base.copy()
-        ppx = []
-        for (gx, gy) in full_cells:
-            wx, wy = cell_to_world(gx, gy, meta)
-            u, v = world_to_pixel(wx, wy)
-            ppx.append((int(u), int(v)))
-        for a, b in zip(ppx, ppx[1:]):
-            cv2.line(rp, a, b, (0, 200, 0), 2)
-        anchor_set = {(int(a[0]), int(a[1])) for a in anchors}
-        for (cell, p) in zip(full_cells, ppx):
-            if (int(cell[0]), int(cell[1])) in anchor_set:
-                color = (0, 0, 255)          # red = projected centroid / A* start (BGR)
-            else:
-                color = (0, 255, 255)        # yellow = intermediate waypoint
-            cv2.circle(rp, p, 5, color, -1)
-        # Robot's true, unsnapped start position (the path is published from here).
-        if start_world is not None:
-            su, sv = world_to_pixel(start_world[0], start_world[1])
-            cv2.circle(rp, (int(su), int(sv)), 6, (255, 0, 255), -1)   # magenta = robot start
-        cv2.imwrite(os.path.join(d, "route_planned.png"), rp)
-
-        # 5,6) occupancy maps (white=free, black=occupied, gray=unknown).
-        # The grid is in the WORLD frame, which is transposed/flipped relative to the
-        # camera image (world x runs along image rows, world y along image columns).
-        # Reorient the PNG with flipud(grid.T) so it visually matches the overhead
-        # image — the grid data itself is left untouched (planning uses world frame).
-        def viz(gmap):
-            g2 = np.flipud(gmap.T)
-            out = np.full((*g2.shape, 3), 128, np.uint8)
-            out[g2 == FREE] = (255, 255, 255)
-            out[g2 == OCCUPIED] = (0, 0, 0)
-            return out
-        cv2.imwrite(os.path.join(d, "occ_true.png"), viz(grid))
-        cv2.imwrite(os.path.join(d, "occ_inflated.png"), viz(infl))
-
-        # Inflated obstacles overlaid on the overhead image (pixel space) — shows how far the
-        # inflation overshoots the true obstacles. Each image pixel is mapped to its occupancy
-        # cell: red = true obstacle, yellow = inflation margin (inflated-occupied but not a
-        # true obstacle). Pixel-space, so it lines up with the overhead image directly.
-        h_img, w_img = base.shape[:2]
-        uu, vv = np.meshgrid(np.arange(w_img), np.arange(h_img))
-        xs, ys = pixel_to_world(uu, vv)
-        gx = np.floor((xs - meta["origin_x"]) / meta["resolution"]).astype(np.int64)
-        gy = np.floor((ys - meta["origin_y"]) / meta["resolution"]).astype(np.int64)
-        inb = (gx >= 0) & (gx < meta["width"]) & (gy >= 0) & (gy < meta["height"])
-        gxc = np.clip(gx, 0, meta["width"] - 1)
-        gyc = np.clip(gy, 0, meta["height"] - 1)
-        true_occ = inb & (grid[gyc, gxc] != FREE)      # actual obstacle / unknown
-        infl_occ = inb & (infl[gyc, gxc] == OCCUPIED)
-        margin = infl_occ & ~true_occ                  # cells added purely by inflation
-        infl_overlay = base.copy()
-        infl_overlay[margin] = (0.5 * base[margin] + 0.5 * np.array([0, 220, 220])).astype(np.uint8)    # yellow
-        infl_overlay[true_occ] = (0.5 * base[true_occ] + 0.5 * np.array([0, 0, 220])).astype(np.uint8)  # red
-        cv2.imwrite(os.path.join(d, "inflation_overlay.png"), infl_overlay)
-
-        self.get_logger().info(f"Saved 8 debug artifacts to {d}")
+        # True occupancy map (white=free, black=occupied, gray=unknown), reoriented to match image.
+        g2 = np.flipud(grid.T)
+        occ = np.full((*g2.shape, 3), 128, np.uint8)
+        occ[g2 == FREE] = (255, 255, 255)
+        occ[g2 == OCCUPIED] = (0, 0, 0)
+        cv2.imwrite(os.path.join(out_dir, "occ_true.png"), occ)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Entry‑point
+#  Entry-point
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main(args=None):

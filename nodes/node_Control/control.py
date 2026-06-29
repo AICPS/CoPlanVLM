@@ -65,6 +65,10 @@ class ControlNode(Node):
             for i in range(0, len(msg.data), 2)
         ]
         self.waypoint_queue = deque(coords)  # or list(coords)
+        # A new plan supersedes the old one. Drop the currently-active waypoint by re-parking so
+        # the next control tick re-acquires from the new queue (whose first point is the robot's
+        # current pose) instead of finishing the now-stale leg.
+        self.parked = True
 
     def mocap_callback(self, data):
         """Gets current position information from the motion capture cameras."""
@@ -145,12 +149,18 @@ class ControlNode(Node):
         else:
             self.command.linear.x = self.kP_pos * error_distance
 
-        # Publish the updated velocity command values to the bot
-        self.velocity_publisher.publish(self.command)
-
-        # Checks if in proximity to target (capture radius).
+        # Checks if in proximity to target (capture radius). Mark parked so the next tick pulls
+        # the following waypoint; if the route is finished (queue empty) command a real stop
+        # (zero linear + angular) rather than coasting on the last non-zero command. Intermediate
+        # waypoints are not zeroed, so the robot flows smoothly through them.
         if error_distance < 0.1:
+            if not self.waypoint_queue:
+                self.command.linear.x = 0.0
+                self.command.angular.z = 0.0
             self.parked = True
+
+        # Publish the updated velocity command values to the bot.
+        self.velocity_publisher.publish(self.command)
 
     # def publish_velocity(self):
     #     # Keep yaw error in radians

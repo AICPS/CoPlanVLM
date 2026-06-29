@@ -12,7 +12,7 @@
 #   ./launch_all.sh raph3 1.5 2.0           # args pass through to spawn_second_robot.sh
 #   IGNITION_DELAY=20 ./launch_all.sh       # give the world longer to start
 
-IGNITION_DELAY=${IGNITION_DELAY:-20} # seconds to wait for the world + raph to come up before spawning raph2
+IGNITION_DELAY=${IGNITION_DELAY:-15} # seconds to wait for the world + raph to come up before spawning raph2
 
 # Must match the sim/bridges or nothing shares the ROS graph.
 export ROS_LOCALHOST_ONLY=1
