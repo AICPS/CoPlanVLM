@@ -3,7 +3,7 @@
 # so the planner gets your exact wording (no "telephone" rephrasing).
 #
 # Usage:
-#   ./send_prompt.sh Send raph to the door and raph2 to the window
+#   ./send_prompt.sh Send raph to the door and donnie to the window
 #   ./send_prompt.sh "Send a robot to each person."
 #   ./send_prompt.sh                      # uses the default prompt below
 #

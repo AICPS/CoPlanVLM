@@ -27,7 +27,7 @@ def generate_launch_description():
     
     # Define Robot's Name
     bot_name = 'raph'
-    bot2_name = 'raph2'   # second robot (blue hat); stubbed control on /raph2/* topics
+    bot2_name = 'donnie'   # second robot (blue hat); stubbed control on /donnie/* topics
 
     # Executive API node, OpenAI pathing
     exec_api_node = GroupAction([
@@ -63,7 +63,7 @@ def generate_launch_description():
     ])
 
     # Control node, does low level control of the robot (drive to goal, etc.).
-    # Fully namespaced into raph's topics (symmetric with raph2 below): the translator
+    # Fully namespaced into raph's topics (symmetric with donnie below): the translator
     # publishes raph's plan to /raph/waypoint_path and odom publishes /raph/pose_stamped.
     control_node = GroupAction([
         Node(
@@ -95,9 +95,9 @@ def generate_launch_description():
             ],
         )
 
-    # --- Robot 2 (raph2): the same control/odom nodes, remapped into the raph2 namespace.
-    # The executive now plans for both robots and the translator routes raph2's plan to
-    # /raph2/waypoint_path (it can still be driven manually by publishing there directly).
+    # --- Robot 2 (donnie): the same control/odom nodes, remapped into the donnie namespace.
+    # The executive now plans for both robots and the translator routes donnie's plan to
+    # /donnie/waypoint_path (it can still be driven manually by publishing there directly).
     control_node_2 = GroupAction([
         Node(
             package='talking-turtle',

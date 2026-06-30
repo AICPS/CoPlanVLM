@@ -12,11 +12,11 @@ Prerequisites:
 Usage (from workspace root):
     # Test planner only (no VLM, fastest):
     python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
-        --grid-path '{"raph": ["A1","C3","F5"], "raph2": ["N8","K6","H4"]}'
+        --grid-path '{"raph": ["A1","C3","F5"], "donnie": ["N8","K6","H4"]}'
 
     # Full pipeline including VLM call:
     python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
-        --prompt "Send raph to the chair and raph2 to the table"
+        --prompt "Send raph to the chair and donnie to the table"
 
     # Use A* instead of CHOMP:
     python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
@@ -243,7 +243,7 @@ def main() -> None:
     parser.add_argument("--data", default="test_data",
                         help="Dir containing overhead.png + poses.json (default: test_data)")
     parser.add_argument("--grid-path",
-                        default='{"raph": ["A8","B8","C8","D8","E8","F8","G8","H8","I8","J8"], "raph2": ["A1"]}',
+                        default='{"raph": ["A8","B8","C8","D8","E8","F8","G8","H8","I8","J8"], "donnie": ["A1"]}',
                         help='JSON string {"robot": ["A1","B2",...]} — skips VLM call')
     parser.add_argument("--prompt", default=None,
                         help="User instruction for GPT-4o (used only if --grid-path not set)")

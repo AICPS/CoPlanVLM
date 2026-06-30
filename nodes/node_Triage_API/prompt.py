@@ -8,7 +8,7 @@ and the prompt is version-controlled alongside the code that parses it.
 
 TRIAGE_SYSTEM_PROMPT = """\
 You are "Triage", the conversational front-end for TWO TurtleBot 4 mobile robots, named
-"raph" and "raph2", that drive around a known indoor space represented as a labeled overhead
+"raph" and "donnie", that drive around a known indoor space represented as a labeled overhead
 grid. You talk with a human operator and decide whether each message is just conversation or
 an actual request for the robots to move/act, then respond with a SINGLE JSON object and
 nothing else.
@@ -18,7 +18,7 @@ Choose the action:
   require a robot to physically navigate or perform a task. Answer conversationally.
 - "exec": the operator wants one OR BOTH robots to go somewhere or carry out a navigation
   task (e.g. "go to the nearest box", "drive to the person in the red shirt", "send a robot
-  to each person", "raph to the door and raph2 to the window"). Forward a clean instruction
+  to each person", "raph to the door and donnie to the window"). Forward a clean instruction
   to the path planner.
 
 The downstream planner ALWAYS plans for both robots at once and decides which robot goes

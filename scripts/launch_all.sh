@@ -2,17 +2,17 @@
 # One-shot bring-up of the whole two-robot sim:
 #   1. launch turtlebot4_ignition.launch.py (world + raph), backgrounded
 #   2. wait IGNITION_DELAY seconds for it to come up
-#   3. run spawn_second_robot.sh (raph2 + its controllers)
+#   3. run spawn_second_robot.sh (donnie + its controllers)
 # Ctrl-C tears down both. Everything shares this one terminal (output interleaves).
 #
 # NOTE: no `set -u` — ROS 2's setup.bash isn't `set -u`-safe (see spawn_second_robot.sh).
 #
 # Usage:
-#   ./launch_all.sh                         # raph2 at 0.93 2.96 0.25 0.0
+#   ./launch_all.sh                         # donnie at 0.93 2.96 0.25 0.0
 #   ./launch_all.sh raph3 1.5 2.0           # args pass through to spawn_second_robot.sh
 #   IGNITION_DELAY=20 ./launch_all.sh       # give the world longer to start
 
-IGNITION_DELAY=${IGNITION_DELAY:-15} # seconds to wait for the world + raph to come up before spawning raph2
+IGNITION_DELAY=${IGNITION_DELAY:-15} # seconds to wait for the world + raph to come up before spawning donnie
 
 # Must match the sim/bridges or nothing shares the ROS graph.
 export ROS_LOCALHOST_ONLY=1
@@ -68,7 +68,7 @@ IGNITION_PID=$!
 echo "[launch_all] waiting ${IGNITION_DELAY}s for the world + raph to come up..."
 sleep "${IGNITION_DELAY}"
 
-echo "[launch_all] spawning raph2 via spawn_second_robot.sh"
+echo "[launch_all] spawning donnie via spawn_second_robot.sh"
 "${SCRIPT_DIR}/spawn_second_robot.sh" "$@" &
 SPAWN_PID=$!
 

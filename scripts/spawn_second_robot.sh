@@ -11,13 +11,13 @@
 #
 # Usage:
 #   ./spawn_second_robot.sh [namespace] [x] [y] [z] [yaw]
-#   ./spawn_second_robot.sh                 # raph2 at 0.93 2.96 0.25 0.0
+#   ./spawn_second_robot.sh                 # donnie at 0.93 2.96 0.25 0.0
 #   ./spawn_second_robot.sh raph3 1.5 2.0   # different robot/pose
 
 # NOTE: no `set -u` — ROS 2's setup.bash references unset vars (e.g. AMENT_TRACE_SETUP_FILES)
 # and isn't `set -u`-safe; our own vars below all have ${:-default} fallbacks anyway.
 
-NS=${1:-raph2}
+NS=${1:-donnie}
 X=${2:-0.93}
 Y=${3:-2.96}
 Z=${4:-0.25}

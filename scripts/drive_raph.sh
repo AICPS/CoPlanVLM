@@ -3,9 +3,9 @@
 #
 # Usage:
 #   ./drive_raph.sh                      # raph, 0.2 m/s forward, no rotation
-#   ./drive_raph.sh raph2                # raph2, 0.2 m/s forward
-#   ./drive_raph.sh raph2 0.3            # raph2, 0.3 m/s forward
-#   ./drive_raph.sh raph2 0.3 0.5        # raph2, 0.3 m/s forward + 0.5 rad/s rotation
+#   ./drive_raph.sh donnie                # donnie, 0.2 m/s forward
+#   ./drive_raph.sh donnie 0.3            # donnie, 0.3 m/s forward
+#   ./drive_raph.sh donnie 0.3 0.5        # donnie, 0.3 m/s forward + 0.5 rad/s rotation
 #
 # ros2 topic pub repeats at -r Hz, which keeps the diff-drive watchdog fed so
 # the robot keeps moving. On Ctrl-C the script sends one zero Twist to stop it.

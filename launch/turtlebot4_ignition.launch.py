@@ -57,10 +57,10 @@ for key, default in pose_defaults.items():
         )
     )
 
-# Second robot (raph2) — blue-hatted, spawned alongside raph. Pose defaults to open
+# Second robot (donnie) — blue-hatted, spawned alongside raph. Pose defaults to open
 # floor; adjust x2/y2 if it lands on an obstacle.
 ARGUMENTS += [
-    DeclareLaunchArgument('namespace2', default_value='raph2',
+    DeclareLaunchArgument('namespace2', default_value='donnie',
                           description='Second robot namespace'),
     DeclareLaunchArgument('x2', default_value='0.93', description='x of robot 2 (~1 m +x of the table)'),
     DeclareLaunchArgument('y2', default_value='2.96', description='y of robot 2 (table row)'),
@@ -112,7 +112,7 @@ def generate_launch_description():
             ('yaw', LaunchConfiguration('yaw'))]
     )
 
-    # Second robot (raph2) — uses the SAME filtered spawn as raph (no hat for now).
+    # Second robot (donnie) — uses the SAME filtered spawn as raph (no hat for now).
     # To re-enable the blue hat later, give the filtered spawn a description arg and pass
     # turtlebot4_hat.urdf.xacro (+ hat_color) here; see the deferred notes in the plan.
     robot2_spawn = IncludeLaunchDescription(
@@ -154,13 +154,13 @@ def generate_launch_description():
     ld.add_action(ign_gazebo_resource_path)
     ld.add_action(ignition)
     ld.add_action(robot_spawn)
-    # Stagger raph2 so raph's ign_ros2_control controller_manager fully initializes and loads
-    # its controllers BEFORE raph2's control plugin starts. Both controller_managers run in the
+    # Stagger donnie so raph's ign_ros2_control controller_manager fully initializes and loads
+    # its controllers BEFORE donnie's control plugin starts. Both controller_managers run in the
     # one Gazebo process; launching them simultaneously makes their executors contend and the
     # controller spawners time out ("waiting for /…/controller_manager/list_controllers").
     # Sequential startup mirrors the working "separate terminals" multi-robot workaround
     # (turtlebot4_simulator#60). NOTE: this is for controller init, NOT the render race (that's
-    # fixed by the world-scope Sensors/Contact systems). Tune the period up if raph2 still stalls.
+    # fixed by the world-scope Sensors/Contact systems). Tune the period up if donnie still stalls.
     #ld.add_action(TimerAction(period=20.0, actions=[robot2_spawn]))
     ld.add_action(gz_bridge_node)
     ld.add_action(RegisterEventHandler(OnShutdown(on_shutdown=[cleanup])))

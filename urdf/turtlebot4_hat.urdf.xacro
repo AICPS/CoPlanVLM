@@ -4,7 +4,7 @@
   the robot for overhead identification (so the VLM can tell two robots apart).
 
   Usage (same args as the stock description, plus hat_color RGBA):
-    xacro turtlebot4_hat.urdf.xacro gazebo:=ignition namespace:=raph2 hat_color:='0 0 1 1'
+    xacro turtlebot4_hat.urdf.xacro gazebo:=ignition namespace:=donnie hat_color:='0 0 1 1'
 
   gazebo/namespace args are declared by the included standard description; we only add
   hat_color here.

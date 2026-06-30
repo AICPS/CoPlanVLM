@@ -67,7 +67,7 @@ class PathVisualizer(Node):
         self.bridge = CvBridge()
 
         # Distinct BGR color per robot for its path line + marker (cycled if more robots
-        # than colors). raph -> magenta, raph2 -> cyan by default.
+        # than colors). raph -> magenta, donnie -> cyan by default.
         palette = [(255, 0, 255), (255, 255, 0), (0, 255, 255), (255, 128, 0)]
         self.robot_colors: Dict[str, Tuple[int, int, int]] = {
             name: palette[i % len(palette)] for i, name in enumerate(self.robot_names)
@@ -120,7 +120,7 @@ class PathVisualizer(Node):
         self.declare_parameter("v_column", "center_y")
 
         self.declare_parameter("path_topic", "/grid_path")
-        self.declare_parameter("robot_names", ["raph", "raph2"])
+        self.declare_parameter("robot_names", ["raph", "donnie"])
         self.declare_parameter("raw_map_topic", "/raw_map")
         self.declare_parameter("camera_info_topic", "/ids_overhead/camera_info")
         self.declare_parameter("pose_topic", "/raph/sim_ground_truth_pose")

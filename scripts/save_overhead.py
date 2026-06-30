@@ -6,11 +6,11 @@ The saved files are then used by test_pipeline.py without needing a running sim.
 
 Usage (from workspace root, after 'source install/setup.bash'):
     python3 src/VLM_mission_planning/scripts/save_overhead.py
-    python3 src/VLM_mission_planning/scripts/save_overhead.py --out test_data --robots raph raph2
+    python3 src/VLM_mission_planning/scripts/save_overhead.py --out test_data --robots raph donnie
 
 Output:
     <out>/overhead.png   — BGR image from /ids_overhead/image (typically 1936x1216)
-    <out>/poses.json     — {"raph": {"x": ..., "y": ...}, "raph2": {"x": ..., "y": ...}}
+    <out>/poses.json     — {"raph": {"x": ..., "y": ...}, "donnie": {"x": ..., "y": ...}}
                            Raw Gazebo coordinates as received on /<robot>/pose_stamped.
                            test_pipeline.py applies gazebo_to_world() to match translate.py.
 """
@@ -97,8 +97,8 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", default="test_data",
                         help="Output directory (default: test_data)")
-    parser.add_argument("--robots", nargs="+", default=["raph", "raph2"],
-                        help="Robot names to wait for (default: raph raph2)")
+    parser.add_argument("--robots", nargs="+", default=["raph", "donnie"],
+                        help="Robot names to wait for (default: raph donnie)")
     args = parser.parse_args()
 
     rclpy.init()

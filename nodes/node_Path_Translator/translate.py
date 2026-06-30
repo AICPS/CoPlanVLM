@@ -60,7 +60,7 @@ class SimplePathTranslator(Node):
         self.declare_parameter("v_column", "center_y")
         self.declare_parameter("path_topic", "/grid_path")
         # One robot per entry; each robot's plan is published to /<name>/waypoint_path.
-        self.declare_parameter("robot_names", ["raph", "raph2"])
+        self.declare_parameter("robot_names", ["raph", "donnie"])
 
         # ─── Obstacle-aware planning params ───────────────────────────────────
         self.declare_parameter("image_topic", "/ids_overhead/image")

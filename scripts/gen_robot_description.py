@@ -17,7 +17,7 @@ per-robot so each namespaced robot publishes its own pose).
 Usage (invoked by turtlebot4_spawn_filtered.launch.py via a Command substitution):
     gen_robot_description.py <xacro_file> [xacro_arg ...]
 e.g.
-    gen_robot_description.py .../turtlebot4.urdf.xacro gazebo:=ignition namespace:=raph2
+    gen_robot_description.py .../turtlebot4.urdf.xacro gazebo:=ignition namespace:=donnie
 """
 
 import re

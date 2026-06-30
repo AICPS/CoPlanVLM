@@ -26,7 +26,7 @@ ARGUMENTS = [
     DeclareLaunchArgument('model', default_value='standard',
                           choices=['standard', 'lite'],
                           description='Turtlebot4 Model'),
-    DeclareLaunchArgument('namespace', default_value='raph2',
+    DeclareLaunchArgument('namespace', default_value='donnie',
                           description='Robot namespace'),
 ]
 

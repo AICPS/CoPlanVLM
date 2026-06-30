@@ -49,7 +49,7 @@ class ExecutiveApiNode(Node):
         self.declare_parameter('exec_status_topic', '/nav/status')   # ⇐ output
         self.declare_parameter('need_map_topic', '/need_map')   # ⇐ output
         self.declare_parameter('map_path', '')
-        self.declare_parameter('robot_names', ['raph', 'raph2'])  # roster the planner must cover
+        self.declare_parameter('robot_names', ['raph', 'donnie'])  # roster the planner must cover
         self.declare_parameter('temperature', 0.0)               # 0 = deterministic
         # Replanning strategy: "static" plans once per prompt; "dynamic" re-runs the same prompt
         # at replan_period seconds until a new prompt arrives. Future modes (event-driven, …) add

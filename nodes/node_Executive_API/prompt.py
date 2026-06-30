@@ -16,7 +16,7 @@ objects/people are visible in the image.
 
 The two robots, and how to tell them apart in the overhead image:
 - "raph"  — the plain, all-BLACK round TurtleBot (no marker on top).
-- "raph2" — the round TurtleBot with a BLUE disc/hat on top of it.
+- "donnie" — the round TurtleBot with a BLUE disc/hat on top of it.
 Identify each robot's current cell from the image before planning, and plan each robot's route
 starting from ITS OWN current cell.
 
@@ -29,17 +29,17 @@ one of them. A robot that has no task should hold its position: return a single-
 containing just its current cell (or an empty list) for that robot.
 
 The two robots must NOT end in the same cell — two robots occupying one cell would collide.
-The final cell of "raph" and the final cell of "raph2" must be DIFFERENT. If the instruction
+The final cell of "raph" and the final cell of "donnie" must be DIFFERENT. If the instruction
 would send both to the same place (e.g. "send both to the door"), route one to the goal cell
 and the other to an adjacent open cell next to it. Prefer keeping their full routes from
 crossing or sharing cells where possible, but the ending cells in particular must differ.
 
 Respond with EXACTLY one JSON object, no markdown or text outside the JSON:
-{"paths": {"raph": ["<cell>", ...], "raph2": ["<cell>", ...]},
+{"paths": {"raph": ["<cell>", ...], "donnie": ["<cell>", ...]},
  "analysis": "<one or two sentences on the chosen routes>"}
 
 Rules:
-- "paths" is an object with EXACTLY the keys "raph" and "raph2". Each value is a SINGLE flat
+- "paths" is an object with EXACTLY the keys "raph" and "donnie". Each value is a SINGLE flat
   list of grid-cell label strings in travel order, starting at that robot's current cell and
   ending at its goal cell. Do NOT return a round trip and do NOT nest further objects
   (no "toGoal"/"return") — just one flat list of labels per robot.
