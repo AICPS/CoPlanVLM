@@ -80,9 +80,6 @@ def generate_launch_description():
             name='node_Control',
             output='screen',
             emulate_tty=True,
-            parameters=[
-                {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
-            ],
             remappings=[
                 ('/cmd_vel', '/' + bot_name + '/cmd_vel'),
                 ('/waypoint_path', '/' + bot_name + '/waypoint_path'),
@@ -101,9 +98,6 @@ def generate_launch_description():
             name='node_Control_2',
             output='screen',
             emulate_tty=True,
-            parameters=[
-                {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
-            ],
             remappings=[
                 ('/cmd_vel', '/' + bot2_name + '/cmd_vel'),
                 ('/waypoint_path', '/' + bot2_name + '/waypoint_path'),
@@ -124,7 +118,8 @@ def generate_launch_description():
             {'debug_dir': debug_dir},
             {'save_debug': True},
             {'robot_names': [bot_name, bot2_name]},
-            {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
+            {'camera': 'lab_test'},   # overhead camera calibration for pixel<->world
+            {'image_topic': '/ueye/test/image_raw'},   # live overhead camera frames
         ]
     )
 
@@ -174,13 +169,13 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
               remappings=[
-                ('/raw_map', '/ids_overhead/image'),
+                ('/camera_image', '/ueye/test/image_raw'),
             ],
         ),
     ])
 
     # Dummy overhead camera — only when use_dummy_camera:=true. Republishes a static
-    # test image on /ids_overhead/image (the real camera's topic) so the stack has a
+    # test image on /ueye/test/image_raw (the real camera's topic) so the stack has a
     # frame when no physical camera is connected. Off by default.
     dummy_camera_node = GroupAction([
         Node(
@@ -190,7 +185,7 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
             parameters=[
-                {'topic': '/ids_overhead/image'},
+                {'topic': '/ueye/test/image_raw'},
                 {'rate_hz': 0.5},
             ],
         ),
@@ -224,10 +219,10 @@ def generate_launch_description():
             {'world_path_color': [200, 200, 200]},  # Light gray for reference path
             {'robot_color': [255, 0, 255]},  # Magenta for robot
             {'robot_names': [bot_name, bot2_name]},
-            {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
+            {'camera': 'lab_test'},   # overhead camera calibration for world<->pixel
         ],
         remappings=[
-            ('/raw_map', '/ids_overhead/image'),
+            ('/camera_image', '/ueye/test/image_raw'),
         ],
     )
 
@@ -245,7 +240,7 @@ def generate_launch_description():
             description='Seconds between dynamic replans (used only when replan_mode:=dynamic).'),
         DeclareLaunchArgument(
             'use_dummy_camera', default_value='false',
-            description='Publish a static test frame on /ids_overhead/image instead of using '
+            description='Publish a static test frame on /ueye/test/image_raw instead of using '
                         'the real overhead camera (for testing when the camera is offline).'),
         exec_api_node,
         triage_api_node,

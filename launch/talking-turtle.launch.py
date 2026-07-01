@@ -73,9 +73,6 @@ def generate_launch_description():
             name='node_Control',
             output='screen',
             emulate_tty=True,
-            parameters=[
-                {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
-            ],
             remappings=[
                 ('/cmd_vel', '/' + bot_name + '/cmd_vel'),
                 ('/waypoint_path', '/' + bot_name + '/waypoint_path'),
@@ -109,9 +106,6 @@ def generate_launch_description():
             name='node_Control_2',
             output='screen',
             emulate_tty=True,
-            parameters=[
-                {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
-            ],
             remappings=[
                 ('/cmd_vel', '/' + bot2_name + '/cmd_vel'),
                 ('/waypoint_path', '/' + bot2_name + '/waypoint_path'),
@@ -146,7 +140,7 @@ def generate_launch_description():
             {'debug_dir': debug_dir},
             {'save_debug': True},
             {'robot_names': [bot_name, bot2_name]},
-            {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
+            {'camera': 'gazebo'},   # overhead camera calibration for pixel<->world
         ]
     )
     
@@ -196,7 +190,7 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
               remappings=[
-                ('/raw_map', '/ids_overhead/image'),
+                ('/camera_image', '/ids_overhead/image'),
             ],
         ),
     ])
@@ -229,10 +223,10 @@ def generate_launch_description():
             {'world_path_color': [200, 200, 200]},  # Light gray for reference path
             {'robot_color': [255, 0, 255]},  # Magenta for robot
             {'robot_names': [bot_name, bot2_name]},
-            {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
+            {'camera': 'gazebo'},   # overhead camera calibration for world<->pixel
         ],
         remappings=[
-            ('/raw_map', '/ids_overhead/image'),
+            ('/camera_image', '/ids_overhead/image'),
         ],
     )
 

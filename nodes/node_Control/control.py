@@ -8,17 +8,16 @@ from collections import deque
 import math
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Twist, PoseStamped
-from tf_transformations import euler_from_quaternion
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from coord_transform import world_to_pose
+from coord_transform import ned_to_world_pose, yaw_from_quaternion, wrap_to_pi
 
 # ── Tunable defaults ─────────────────────────────────────────────────────────────────────
 # The controller's tunable knobs, surfaced here for easy adjustment. Each is also exposed as a
 # ROS parameter (same name, lower-case) so it can be overridden from the launch file or at
 # runtime (`ros2 param set ...`) without editing this file.
 DEFAULT_MAX_LINEAR_VEL = 0.15     # m/s   — forward speed clamp (conservative for bring-up)
-DEFAULT_MAX_ANGULAR_VEL = 0.25    # rad/s — turn-rate clamp (conservative for bring-up)
-DEFAULT_HEADING_GATE_DEG = 60.0   # deg   — only drive forward once heading error is within this
+DEFAULT_MAX_ANGULAR_VEL = 0.3    # rad/s — turn-rate clamp (conservative for bring-up)
+DEFAULT_HEADING_GATE_DEG = 30.0   # deg   — only drive forward once heading error is within this
 
 
 class ControlNode(Node):
@@ -41,11 +40,9 @@ class ControlNode(Node):
         self.goal_coordinates = None
         self.goal_yaw = None
 
-        # Which frame the robot's pose is in: "gazebo" (sim) or "ned" (real MoCap). Set by the
-        # launch file; selects the world->pose transform used to convert goals into the pose frame.
-        self.declare_parameter("pose_frame", "gazebo")
-        pose_frame = self.get_parameter("pose_frame").get_parameter_value().string_value
-        self._world_to_pose = world_to_pose(pose_frame)
+        # The robot's pose always arrives in NED (real MoCap, or sim's odom_to_pose which now
+        # emits NED). The controller converts NED -> world and runs the PID in the world frame,
+        # where +yaw is CCW and matches the robot's angular.z — no per-frame switch or sign hack.
 
         # kP constant value.
         self.kP_val = 0.5
@@ -113,54 +110,35 @@ class ControlNode(Node):
             self.publish_velocity() 
 
     def position_error_calc(self):
-        """Publishes the difference between the current position and goal position"""
-        # Get current odometer reading's x & y variables.
-        current_pose = self.current_pose.pose.position
+        """Position error in the WORLD frame: convert the NED pose to world, diff vs the goal."""
+        p = self.current_pose.pose.position
+        q = self.current_pose.pose.orientation
+        ned_yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w)
 
-        # The waypoint is in camera/world (image) axes; convert it into the pose frame (gazebo
-        # in sim, ned on real hardware) so it can be compared against the raw pose reading.
-        goal_x, goal_y = self._world_to_pose(self.goal_coordinates[0], self.goal_coordinates[1])
+        # NED pose -> world (x, y, yaw). Waypoints from the translator are ALREADY world-frame,
+        # so we compare directly. Cache the world heading for orientation_error_calc.
+        self.robot_wx, self.robot_wy, self.current_yaw = ned_to_world_pose(p.x, p.y, ned_yaw)
 
-        # Calc x & y differences between pose reading & Goal position.
-        x_difference = goal_x - current_pose.x
-        y_difference = goal_y - current_pose.y
+        x_difference = self.goal_coordinates[0] - self.robot_wx
+        y_difference = self.goal_coordinates[1] - self.robot_wy
 
-        # Initialize odom_error attribute to PoseStamped data type
         self.pose_error = PoseStamped()
         self.pose_error.pose.position.x = x_difference
         self.pose_error.pose.position.y = y_difference
 
     def orientation_error_calc(self):
-        """Orients turtlebot towards the goal point."""
-        # Gets current turtlebot_position
-        data = self.current_pose
-        # Sets y_difference and x_difference values for relative_yaw calculation
-        x_difference, y_difference = self.pose_error.pose.position.x, self.pose_error.pose.position.y
+        """Heading error in the WORLD frame (z-up / +yaw CCW, matching the robot's angular.z)."""
+        x_difference = self.pose_error.pose.position.x
+        y_difference = self.pose_error.pose.position.y
 
-        # Converts the odom data from quaternion (sensory input) into euler (yaw angular)
-        ##### DO NOT CHANGE THE FOLLOW LINES OF CODE.
-        ornt_quat = data.pose.orientation
-        ornt_quat_list = [ornt_quat.x, ornt_quat.y, ornt_quat.z, ornt_quat.w]
-        [roll, pitch, yaw] = euler_from_quaternion(ornt_quat_list)
-        self.cur_yaw_euler = [roll, pitch, yaw]
-        ##### END SECTION
-
-        # Calculate the yaw error (amount to rotate)
-        self.current_yaw = self.cur_yaw_euler[2]
-        relative_yaw = math.atan2(y_difference, x_difference)
-        # self.yaw_error = relative_yaw - self.current_yaw
-        self.yaw_error = -relative_yaw + self.current_yaw
+        # Bearing to the goal in world, minus the robot's world heading (cached above).
+        bearing_world = math.atan2(y_difference, x_difference)
+        self.yaw_error = wrap_to_pi(bearing_world - self.current_yaw)
 
     def publish_velocity(self):
         """Publishes the linear and angular velocity commands to the hardware."""
-        # Convert yaw error into degrees (from radians)
-        yaw_error_deg = self.yaw_error * (180/math.pi)
-
-        if yaw_error_deg > 180:
-            yaw_error_deg = -(yaw_error_deg - 180)  ## TODO Computational Error here!!!
-        if yaw_error_deg < -180:
-            yaw_error_deg = (abs(yaw_error_deg) - 180)
-
+        # yaw_error is already wrapped to [-pi, pi]; kP_val is tuned in degrees.
+        yaw_error_deg = self.yaw_error * (180 / math.pi)
         self.command.angular.z = self.kP_val * yaw_error_deg
 
         # Calculate and initiate forward movement of the robot.
@@ -169,10 +147,9 @@ class ControlNode(Node):
 
         # Heading gate: only drive forward when roughly facing the goal. If the heading error
         # exceeds heading_gate_deg, command zero linear velocity and just rotate toward the goal
-        # (prevents wide arcs that cut corners / clip obstacles). yaw_error is wrapped to
-        # [-pi, pi] so the comparison reflects the true signed heading error.
-        wrapped_yaw_err = math.atan2(math.sin(self.yaw_error), math.cos(self.yaw_error))
-        if abs(wrapped_yaw_err) > self.heading_gate_rad:
+        # (prevents wide arcs that cut corners / clip obstacles). yaw_error is already wrapped to
+        # [-pi, pi], so it reflects the true signed heading error.
+        if abs(self.yaw_error) > self.heading_gate_rad:
             self.command.linear.x = 0.0
         else:
             self.command.linear.x = self.kP_pos * error_distance

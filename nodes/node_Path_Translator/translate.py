@@ -34,7 +34,7 @@ from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
-from coord_transform import pose_to_world
+from coord_transform import ned_to_world, set_active_camera
 from obs_seg import FREE, OCCUPIED, UNKNOWN
 from obs_seg.segmenter import TraversabilitySegmenter
 from obs_seg.occupancy import mask_to_occupancy
@@ -62,11 +62,10 @@ class SimplePathTranslator(Node):
         # One robot per entry; each robot's plan is published to /<name>/waypoint_path.
         self.declare_parameter("robot_names", ["raph", "donnie"])
 
-        # Which frame incoming poses are in: "gazebo" (sim ground truth) or "ned" (real MoCap).
-        # Set by the launch file (sim vs deploy); picks the pose->world transform used below.
-        self.declare_parameter("pose_frame", "gazebo")
-        pose_frame = self.get_parameter("pose_frame").get_parameter_value().string_value
-        self._pose_to_world = pose_to_world(pose_frame)
+        # Which overhead camera calibration to use for pixel<->world (grid labels, occupancy):
+        # "gazebo" (sim) or "lab_test" (hardware). Set by the launch file. Poses arrive in NED.
+        self.declare_parameter("camera", "gazebo")
+        set_active_camera(self.get_parameter("camera").get_parameter_value().string_value)
 
         # ─── Obstacle-aware planning params ───────────────────────────────────
         self.declare_parameter("image_topic", "/ids_overhead/image")
@@ -155,9 +154,9 @@ class SimplePathTranslator(Node):
 
     # ------------------------------------------------------------------
     def _make_pose_cb(self, name: str):
-        """Cache the robot's position in the world frame (pose converted via the pose_frame transform)."""
+        """Cache the robot's position in the world frame (NED pose -> world)."""
         def _cb(msg: PoseStamped) -> None:
-            self.robot_xy[name] = self._pose_to_world(msg.pose.position.x, msg.pose.position.y)
+            self.robot_xy[name] = ned_to_world(msg.pose.position.x, msg.pose.position.y)
         return _cb
 
     # ------------------------------------------------------------------

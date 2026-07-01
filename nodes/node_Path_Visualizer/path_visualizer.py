@@ -23,7 +23,8 @@ from std_msgs.msg import Float32MultiArray, String
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
-from coord_transform import world_to_pixel, pose_to_world
+from coord_transform import (world_to_pixel, world_to_pixel_pose, ned_to_world,
+                             ned_to_world_pose, yaw_from_quaternion, set_active_camera)
 
 
 class PathVisualizer(Node):
@@ -41,7 +42,7 @@ class PathVisualizer(Node):
 
         self.path_topic = self.get_parameter("path_topic").value
         self.robot_names = [str(n) for n in self.get_parameter("robot_names").value]
-        self.raw_map_topic = self.get_parameter("raw_map_topic").value
+        self.camera_image_topic = self.get_parameter("camera_image_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
         self.viz_topic = self.get_parameter("viz_topic").value
 
@@ -73,7 +74,7 @@ class PathVisualizer(Node):
             name: palette[i % len(palette)] for i, name in enumerate(self.robot_names)
         }
 
-        self.latest_raw_map: Optional[np.ndarray] = None
+        self.latest_camera_image: Optional[np.ndarray] = None
         self.captured_map: Optional[np.ndarray] = None
         # Per-robot latest state, keyed by robot name.
         self.latest_path_labels: Dict[str, List[str]] = {n: [] for n in self.robot_names}
@@ -90,9 +91,9 @@ class PathVisualizer(Node):
             Path(get_package_share_directory("talking-turtle")) / "path_overlay.png"
         )
 
-        # Single planner /grid_path (a {robot: [labels]} dict) + shared raw map + camera info.
+        # Single planner /grid_path (a {robot: [labels]} dict) + shared camera image + camera info.
         self.create_subscription(String, self.path_topic, self._path_callback, 10)
-        self.create_subscription(Image, self.raw_map_topic, self._raw_map_callback, 1)
+        self.create_subscription(Image, self.camera_image_topic, self._camera_image_callback, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 1)
         # Per-robot world path + pose. Pose comes from /<name>/ned/pose_stamped (PoseStamped,
         # published BEST_EFFORT by node_Odometry_To_Pose in sim, or directly by MoCap in the real
@@ -122,16 +123,15 @@ class PathVisualizer(Node):
 
         self.declare_parameter("path_topic", "/grid_path")
         self.declare_parameter("robot_names", ["raph", "donnie"])
-        self.declare_parameter("raw_map_topic", "/raw_map")
+        self.declare_parameter("camera_image_topic", "/camera_image")
         self.declare_parameter("camera_info_topic", "/ids_overhead/camera_info")
         self.declare_parameter("pose_topic", "/raph/sim_ground_truth_pose")
         self.declare_parameter("viz_topic", "/path_visualization")
 
-        # Which frame incoming poses are in: "gazebo" (sim) or "ned" (real MoCap). Set by the
-        # launch file; picks the pose->world transform used to place the robot marker/arrow.
-        self.declare_parameter("pose_frame", "gazebo")
-        self._pose_to_world = pose_to_world(
-            self.get_parameter("pose_frame").get_parameter_value().string_value)
+        # Which overhead camera calibration to use for world<->pixel: "gazebo" (sim) or
+        # "lab_test" (hardware). Set by the launch file. Poses always arrive in NED.
+        self.declare_parameter("camera", "gazebo")
+        set_active_camera(self.get_parameter("camera").get_parameter_value().string_value)
 
         self.declare_parameter("save_overlays", True)
         self.declare_parameter("window_name", "Path Tracking")
@@ -193,15 +193,15 @@ class PathVisualizer(Node):
             self.latest_world_path[name] = coords
         return _cb
 
-    def _raw_map_callback(self, msg: Image) -> None:
+    def _camera_image_callback(self, msg: Image) -> None:
         try:
             image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as exc:
-            self.get_logger().error(f"Failed to decode /raw_map: {exc}")
+            self.get_logger().error(f"Failed to decode /camera_image: {exc}")
             return
 
         image = self._undistort_image(image)
-        self.latest_raw_map = image
+        self.latest_camera_image = image
         if self.captured_map is None:
             self.captured_map = image.copy()
             self.get_logger().info("Captured base map image for waypoint overlays")
@@ -268,11 +268,6 @@ class PathVisualizer(Node):
         u, v = world_to_pixel(x_world, y_world)
         return int(round(u)), int(round(v))
 
-    @staticmethod
-    def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        return math.atan2(siny_cosp, cosy_cosp)
 
     def _draw_colored_arrow(
         self,
@@ -385,10 +380,10 @@ class PathVisualizer(Node):
 
     def plot_tracking_window(self) -> None:
         """Show live OpenCV tracking window: each robot's world path, VLM path, and pose."""
-        if self.latest_raw_map is None:
+        if self.latest_camera_image is None:
             return
 
-        frame = self.latest_raw_map.copy()
+        frame = self.latest_camera_image.copy()
 
         for idx, name in enumerate(self.robot_names):
             color = self.robot_colors[name]
@@ -407,34 +402,24 @@ class PathVisualizer(Node):
             self._draw_grid_path(frame, path_pixels, color, name)
 
             # Actual measured trajectory trail (history of poses), drawn DASHED in the robot's
-            # color so it reads distinct from the SOLID planned path. Poses are in the pose
-            # frame (gazebo/ned), so convert into the camera/world frame to overlay the path.
-            traj = [self._world_to_pixel(*self._pose_to_world(hx, hy))
+            # color so it reads distinct from the SOLID planned path. Poses are in NED, so
+            # convert NED -> world -> pixel to overlay the planned path.
+            traj = [self._world_to_pixel(*ned_to_world(hx, hy))
                     for hx, hy in self.pose_history[name]]
             self._draw_dashed_polyline(frame, traj, color, thickness=2)
 
-            # Robot pose from /<name>/ned/pose_stamped.
+            # Robot pose from /<name>/ned/pose_stamped (NED).
             pose_msg = self.latest_pose[name]
             if pose_msg is not None:
                 pose = pose_msg.pose
-                robot_u, robot_v = self._world_to_pixel(
-                    *self._pose_to_world(pose.position.x, pose.position.y))
-                yaw = self._yaw_from_quaternion(
-                    pose.orientation.x,
-                    pose.orientation.y,
-                    pose.orientation.z,
-                    pose.orientation.w,
-                )
-                # The heading must pass through the SAME pose_frame->world->pixel pipeline as the
-                # position (gazebo in sim, ned on hardware — selected by self._pose_to_world).
-                # The image axes differ from the pose frame (e.g. the Gazebo swap / NED flip plus
-                # the inverted row axis), so using the raw yaw directly in pixel space points the
-                # arrow the wrong way. Transform a point one metre ahead of the robot and aim the
-                # arrow from the dot toward it (length is normalised below, so the 1 m step is arbitrary).
-                head_x = pose.position.x + math.cos(yaw)
-                head_y = pose.position.y + math.sin(yaw)
-                head_u, head_v = self._world_to_pixel(*self._pose_to_world(head_x, head_y))
-                pixel_yaw = math.atan2(head_v - robot_v, head_u - robot_u)
+                ned_yaw = yaw_from_quaternion(
+                    pose.orientation.x, pose.orientation.y,
+                    pose.orientation.z, pose.orientation.w)
+                # NED pose -> world -> pixel, all through the shared pose transforms so the arrow
+                # can never disagree with the dot (each conversion carries the yaw consistently).
+                wx, wy, wyaw = ned_to_world_pose(pose.position.x, pose.position.y, ned_yaw)
+                pu, pv, pixel_yaw = world_to_pixel_pose(wx, wy, wyaw)
+                robot_u, robot_v = int(round(pu)), int(round(pv))
                 arrow_len = 30
                 tip = (
                     int(robot_u + arrow_len * math.cos(pixel_yaw)),

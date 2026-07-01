@@ -26,7 +26,11 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 
-from coord_transform import pose_to_world, world_to_pixel
+import math
+
+from tf_transformations import quaternion_from_euler
+from coord_transform import (ned_to_world_pose, world_to_pixel, yaw_from_quaternion,
+                             set_active_camera)
 
 
 class EchoWorldPose(Node):
@@ -34,17 +38,15 @@ class EchoWorldPose(Node):
         super().__init__("echo_world_pose")
 
         self.declare_parameter("robot", "donnie")
-        self.declare_parameter("pose_frame", "ned")   # matches the deploy launch
-        # Empty -> derive /<robot>/<pose_frame>/pose_stamped; else use this exact topic.
+        self.declare_parameter("camera", "lab_test")   # world<->pixel calibration
+        # Empty -> derive /<robot>/ned/pose_stamped; else use this exact topic.
         self.declare_parameter("input_topic", "")
 
         robot = self.get_parameter("robot").get_parameter_value().string_value
-        frame = self.get_parameter("pose_frame").get_parameter_value().string_value
+        set_active_camera(self.get_parameter("camera").get_parameter_value().string_value)
         input_topic = self.get_parameter("input_topic").get_parameter_value().string_value
         if not input_topic:
-            input_topic = f"/{robot}/{frame}/pose_stamped"
-
-        self._to_world = pose_to_world(frame)
+            input_topic = f"/{robot}/ned/pose_stamped"
 
         qos = QoSProfile(depth=1)
         qos.reliability = ReliabilityPolicy.BEST_EFFORT   # compatible with any publisher
@@ -52,12 +54,13 @@ class EchoWorldPose(Node):
         self.create_subscription(PoseStamped, input_topic, self._cb, qos)
 
         self.get_logger().info(
-            f"echoing {input_topic} ({frame}) -> world, republishing /{robot}/world/pose_stamped"
+            f"echoing {input_topic} (NED) -> world, republishing /{robot}/world/pose_stamped"
         )
 
     def _cb(self, msg: PoseStamped):
         rx, ry = msg.pose.position.x, msg.pose.position.y
-        wx, wy = self._to_world(rx, ry)
+        nyaw = yaw_from_quaternion(*(getattr(msg.pose.orientation, a) for a in "xyzw"))
+        wx, wy, wyaw = ned_to_world_pose(rx, ry, nyaw)
         u, v = world_to_pixel(wx, wy)
 
         out = PoseStamped()
@@ -65,11 +68,14 @@ class EchoWorldPose(Node):
         out.pose.position.x = float(wx)
         out.pose.position.y = float(wy)
         out.pose.position.z = msg.pose.position.z
-        out.pose.orientation = msg.pose.orientation   # orientation left as-is
+        qx, qy, qz, qw = quaternion_from_euler(0.0, 0.0, wyaw)
+        out.pose.orientation.x, out.pose.orientation.y = qx, qy
+        out.pose.orientation.z, out.pose.orientation.w = qz, qw
         self.pub.publish(out)
 
         self.get_logger().info(
-            f"raw({rx:+.3f}, {ry:+.3f}) m  ->  world({wx:+.3f}, {wy:+.3f}) m  ->  px({u:.1f}, {v:.1f})"
+            f"raw({rx:+.3f}, {ry:+.3f}) m yaw {math.degrees(nyaw):+.1f}  ->  "
+            f"world({wx:+.3f}, {wy:+.3f}) m yaw {math.degrees(wyaw):+.1f}  ->  px({u:.1f}, {v:.1f})"
         )
 
 

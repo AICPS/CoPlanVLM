@@ -1,116 +1,214 @@
-"""Shared overhead-image <-> world-frame coordinate transform (plain library, NOT a ROS node).
+"""Shared coordinate transforms (plain library, NOT a ROS node).
 
-Single source of truth so the path translator (node_Path_Translator), the occupancy-map
-generator (obs_seg) and the visualizer can never disagree on the conversion. No rclpy, no node,
-no entry point -- just importable functions plus the calibration they use.
+Single source of truth so the path translator, the occupancy-map generator (obs_seg), the
+controller and the visualizer can never disagree on frames. No rclpy, no node, no entry point.
 
-Convention (straight-down overhead camera, ground plane):
-    x = WORLD_ORIGIN_X + (v - ORIGIN_PIXEL_V) * METRES_PER_PIXEL_Y   # world x from image row v
-    y = WORLD_ORIGIN_Y + (u - ORIGIN_PIXEL_U) * METRES_PER_PIXEL_X   # world y from image col u
-where (u, v) = pixel (column, row).
+Four frames, all defined relative to the canonical WORLD frame
+=============================================================
+1. WORLD (canonical): origin directly under the camera nadir at (0, 0); +x to the RIGHT of
+   the image, +y to the TOP of the image; z up; +yaw counter-clockwise (on the image).
+   ALL planning and control happen in this frame.
+2. PIXEL: overhead image, per-camera pinhole. Image column u increases right, row v increases
+   DOWN. Selectable camera in {"gazebo", "lab_test"}.
+3. NED: North-East-Down (MoCap room; and sim odom_to_pose emits it too). z is DOWN, so it is a
+   reflection of WORLD in the ground plane — the yaw is NOT a plain negation (see below).
+4. GAZEBO: sim ground-truth frame. Only used by odom_to_pose to produce NED in sim.
+
+Yaw is always derived from the SAME position transform (project a point one step ahead and take
+the resulting heading), so axis swaps / z-flips / origin offsets are handled automatically. Use
+the *_pose (x, y, yaw) helpers rather than hand-coding a per-frame yaw formula.
 """
+import math
 
-# ── Linear calibration for the overhead camera (THE SINGLE SOURCE OF TRUTH) ──────────────
-# Derived from the ideal nadir pinhole sim (ids_overhead): z=9.5 m, 80 deg HFOV, 1936x1216 ->
-# f=1153.62 px, scale = 9.5/1153.62 = 0.008235 m/px (isotropic); nadir (5.5,0) -> image centre.
-# NOTE: these values are SPECIFIC TO THE sim_world world (camera height 9.5 m). A different
-# world/camera height (e.g. house at z=10 m) would need a recomputed scale.
-
-# --- old calibration from previous (hand-tuned; wrong scale + H4-cell-pixel anchor) ---
-# WORLD_ORIGIN_X = 0.0
-# WORLD_ORIGIN_Y = 5.5
-# METRES_PER_PIXEL_X = 1.0 / 138.0
-# METRES_PER_PIXEL_Y = -1.0 / 152.0
-# ORIGIN_PIXEL_U = 1035.0
-# ORIGIN_PIXEL_V = 532.0
-
-WORLD_ORIGIN_X = 0.0          # camera nadir world Y (the anchor maps here)
-WORLD_ORIGIN_Y = 5.5         # camera nadir world X
-METRES_PER_PIXEL_X = 0.008235     # world y per image column   (= 9.5 / 1153.62)
-METRES_PER_PIXEL_Y = -0.008235    # world x per image row      (axis inverted)
-ORIGIN_LABEL = "H4"          # legacy reference only; no longer used by the transform
-# Anchor pixel = camera nadir = principal point = image centre (1936/2, 1216/2).
-ORIGIN_PIXEL_U = 968.0
-ORIGIN_PIXEL_V = 608.0
+# ── Camera intrinsics (per camera) ───────────────────────────────────────────────────────
+# Perfect-pinhole model: metres_per_pixel = height / f, principal point at (cx, cy).
+# gazebo: ideal nadir sim (ids_overhead) z=9.5 m, 80 deg HFOV, 1936x1216 -> f=1153.6 px,
+#   scale 9.5/1153.6 = 0.008235 m/px; principal point = image centre.
+# lab_test: real intrinsic calibration (camera_matrix K, 1920x1200 raw images) z=4.27 m.
+#   fx != fy here, so the pinhole scale differs per axis; the yaw/pixel maths below handle it.
+# fx=fy=1153.6187 == height / 0.008235, so gazebo reproduces the old 0.008235 m/px exactly.
+CAMERAS = {
+    "gazebo":   {"height": 9.5, "fx": 1153.6187, "fy": 1153.6187, "cx": 968.0, "cy": 608.0},
+    "lab_test": {"height": 4.27, "fx": 959.5390439489479, "fy": 948.7315120801915, "cx": 988.0379239269574, "cy": 621.2961259804192},
+}
 
 
-def pixel_to_world(u, v):
-    """Image pixel (u=col, v=row) -> world (x, y) in metres.
+_active_camera = "gazebo"
 
-    Fully self-contained: the whole calibration (anchor pixel, anchor world coord, scale) lives
-    in this module. Scalar or numpy-array inputs for u, v both work (vectorized). Returns (x, y).
+
+def set_active_camera(name):
+    """Select which camera calibration pixel<->world uses by default (call once at node init)."""
+    global _active_camera
+    if name not in CAMERAS:
+        raise ValueError(f"unknown camera {name!r}; expected one of {sorted(CAMERAS)}")
+    _active_camera = name
+
+
+def get_active_camera():
+    return _active_camera
+
+
+def _cam(camera):
+    return CAMERAS[camera if camera is not None else _active_camera]
+
+
+# ── Frame offsets (placeholders; tune once real geometry is known) ───────────────────────
+# NED origin vs world origin (applied in NED metres). 0 assumes MoCap origin under the nadir.
+NED_OFFSET_X = 0.0
+NED_OFFSET_Y = 0.0
+# GAZEBO origin vs world origin (applied in Gazebo metres). Backed out from the previous
+# calibration: the nadir sits at Gazebo (5.5, 0). Confirm in sim.
+GZ_OFFSET_X = 5.5
+GZ_OFFSET_Y = 0.0
+
+
+# ── Angle helpers ────────────────────────────────────────────────────────────────────────
+def wrap_to_pi(angle):
+    """Wrap an angle (radians) to (-pi, pi]."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def yaw_from_quaternion(x, y, z, w):
+    """Planar yaw (rotation about the frame's z axis) from a quaternion, in [-pi, pi].
+
+    Matches tf_transformations.euler_from_quaternion()[2].
     """
-    x = WORLD_ORIGIN_X + (v - ORIGIN_PIXEL_V) * METRES_PER_PIXEL_Y
-    y = WORLD_ORIGIN_Y + (u - ORIGIN_PIXEL_U) * METRES_PER_PIXEL_X
-    return x, y
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
-def world_to_pixel(x, y):
-    """World (x, y) metres -> image pixel (u=col, v=row). Exact inverse of pixel_to_world."""
-    u = ORIGIN_PIXEL_U + (y - WORLD_ORIGIN_Y) / METRES_PER_PIXEL_X
-    v = ORIGIN_PIXEL_V + (x - WORLD_ORIGIN_X) / METRES_PER_PIXEL_Y
+# ── WORLD <-> PIXEL (per camera) ─────────────────────────────────────────────────────────
+def world_to_pixel(x, y, camera=None):
+    """World (x, y) metres -> image pixel (u=col, v=row) for `camera` (default: active)."""
+    c = _cam(camera)
+    u = c["cx"] + x * c["fx"] / c["height"]
+    v = c["cy"] - y * c["fy"] / c["height"]      # image row grows downward -> minus
     return u, v
 
 
-def gazebo_to_world(x, y):
-    """Gazebo physical frame -> camera/world (image) frame.
+def pixel_to_world(u, v, camera=None):
+    """Image pixel (u=col, v=row) -> world (x, y) metres for `camera` (default: active).
 
-    The overhead camera image axes are rotated 90 deg relative to Gazebo, so a point at Gazebo
-    (x, y) lies at camera/world (y, x) — a pure axis swap. world_to_gazebo is the inverse.
+    Scalar or numpy-array inputs both work (vectorized).
     """
-    return y, x
+    c = _cam(camera)
+    x = (u - c["cx"]) * c["height"] / c["fx"]
+    y = -(v - c["cy"]) * c["height"] / c["fy"]
+    return x, y
+
+
+def world_yaw_to_pixel(yaw, camera=None):
+    """World yaw -> pixel yaw. A world heading direction (cos yaw, sin yaw) maps to the pixel
+    direction (fx*cos yaw, -fy*sin yaw) -- the image row axis grows downward (v = -y), and
+    anisotropic focal lengths (fx != fy) scale the two axes differently. When fx == fy this
+    reduces to pixel_yaw = -world_yaw."""
+    c = _cam(camera)
+    return math.atan2(-c["fy"] * math.sin(yaw), c["fx"] * math.cos(yaw))
+
+
+def pixel_yaw_to_world(yaw, camera=None):
+    """Pixel yaw -> world yaw. Inverse of world_yaw_to_pixel: a pixel direction (cos, sin)
+    unscales to the world direction (cos/fx, -sin/fy). When fx == fy this reduces to
+    world_yaw = -pixel_yaw."""
+    c = _cam(camera)
+    return math.atan2(-math.sin(yaw) / c["fy"], math.cos(yaw) / c["fx"])
+
+
+def world_to_pixel_pose(x, y, yaw, camera=None):
+    """World pose (x, y, yaw) -> pixel pose (u, v, yaw_pixel)."""
+    u, v = world_to_pixel(x, y, camera)
+    return u, v, world_yaw_to_pixel(yaw, camera)
+
+
+def pixel_to_world_pose(u, v, yaw, camera=None):
+    """Pixel pose (u, v, yaw_pixel) -> world pose (x, y, yaw)."""
+    x, y = pixel_to_world(u, v, camera)
+    return x, y, pixel_yaw_to_world(yaw, camera)
+
+
+# ── WORLD <-> NED ────────────────────────────────────────────────────────────────────────
+def world_to_ned(x, y):
+    """World (x, y) -> NED (x=North, y=East). ned_x = world_y, ned_y = world_x (+ offset).
+
+    A pure axis swap: NED North (+x) = world +y (image up), NED East (+y) = world +x
+    (image right).
+    """
+    return y + NED_OFFSET_X, x + NED_OFFSET_Y
+
+
+def ned_to_world(nx, ny):
+    """NED (x, y) -> world (x, y). Inverse of world_to_ned."""
+    return ny - NED_OFFSET_Y, nx - NED_OFFSET_X
+
+
+def ned_yaw_to_world(yaw):
+    """NED yaw -> world yaw. NED is z-down and swapped, so world_yaw = 90deg - ned_yaw."""
+    return wrap_to_pi(math.pi / 2 - yaw)
+
+
+def world_yaw_to_ned(yaw):
+    """World yaw -> NED yaw. Inverse (an involution): ned_yaw = 90deg - world_yaw."""
+    return wrap_to_pi(math.pi / 2 - yaw)
+
+
+def ned_to_world_pose(nx, ny, yaw):
+    """NED pose (x, y, yaw) -> world pose (x, y, yaw)."""
+    wx, wy = ned_to_world(nx, ny)
+    return wx, wy, ned_yaw_to_world(yaw)
+
+
+def world_to_ned_pose(x, y, yaw):
+    """World pose (x, y, yaw) -> NED pose (x, y, yaw)."""
+    nx, ny = world_to_ned(x, y)
+    return nx, ny, world_yaw_to_ned(yaw)
+
+
+# ── WORLD <-> GAZEBO ─────────────────────────────────────────────────────────────────────
+def gazebo_to_world(gx, gy):
+    """Gazebo (x, y) -> world (x, y). Identity direction with an origin offset."""
+    return gx - GZ_OFFSET_X, gy - GZ_OFFSET_Y
 
 
 def world_to_gazebo(x, y):
-    """Camera/world (image) frame -> Gazebo physical frame. Inverse of gazebo_to_world.
-
-    Currently also a pure x<->y swap, but defined explicitly (rather than reusing
-    gazebo_to_world) so the inverse stays correct if the gazebo<->world relationship ever
-    becomes more than a swap.
-    """
-    return y, x
+    """World (x, y) -> Gazebo (x, y). Inverse of gazebo_to_world."""
+    return x + GZ_OFFSET_X, y + GZ_OFFSET_Y
 
 
-def ned_to_world(x, y):
-    """MoCap NED pose frame -> camera/world (image) frame.
-
-    Empirically, on the overhead image the MoCap North (+x) axis points toward the BOTTOM
-    of the image and East (+y) points to the LEFT — i.e. NED is anti-aligned with the
-    camera/world frame (whose +x is image-up and +y is image-right, per world_to_pixel).
-    So the conversion is a 180-degree in-plane flip: (x, y) -> (-x, -y). world_to_ned is
-    the inverse (negation is its own inverse).
-
-    NOTE: like gazebo_to_world this captures axis DIRECTION only and carries NO origin
-    offset (it assumes the MoCap origin coincides with the camera nadir / world origin). If
-    the two origins differ, add the measured (dx, dy) offset here.
-    """
-    return -x, -y
+def gazebo_yaw_to_world(yaw):
+    """Gazebo yaw -> world yaw. Gazebo axes align with world (identity direction)."""
+    return wrap_to_pi(yaw)
 
 
-def world_to_ned(x, y):
-    """Camera/world (image) frame -> MoCap NED pose frame. Inverse of ned_to_world."""
-    return -x, -y
+def world_yaw_to_gazebo(yaw):
+    """World yaw -> Gazebo yaw. Inverse (identity)."""
+    return wrap_to_pi(yaw)
 
 
-# ── Pose-frame selection ─────────────────────────────────────────────────────────────────
-# The robot's raw pose arrives in "gazebo" axes in sim and "ned" axes on real hardware
-# (MoCap). Nodes take a pose_frame parameter and look up the matching transform here, so the
-# same code path serves both without hardcoding a frame.
-_POSE_TO_WORLD = {"gazebo": gazebo_to_world, "ned": ned_to_world}
-_WORLD_TO_POSE = {"gazebo": world_to_gazebo, "ned": world_to_ned}
+def gazebo_to_world_pose(gx, gy, yaw):
+    """Gazebo pose (x, y, yaw) -> world pose (x, y, yaw)."""
+    wx, wy = gazebo_to_world(gx, gy)
+    return wx, wy, gazebo_yaw_to_world(yaw)
 
 
-def pose_to_world(frame):
-    """Return the pose-frame->world transform for frame ('gazebo' or 'ned')."""
-    try:
-        return _POSE_TO_WORLD[frame]
-    except KeyError:
-        raise ValueError(f"unknown pose_frame {frame!r}; expected one of {sorted(_POSE_TO_WORLD)}")
+def world_to_gazebo_pose(x, y, yaw):
+    """World pose (x, y, yaw) -> Gazebo pose (x, y, yaw)."""
+    gx, gy = world_to_gazebo(x, y)
+    return gx, gy, world_yaw_to_gazebo(yaw)
 
 
-def world_to_pose(frame):
-    """Return the world->pose-frame transform for frame ('gazebo' or 'ned')."""
-    try:
-        return _WORLD_TO_POSE[frame]
-    except KeyError:
-        raise ValueError(f"unknown pose_frame {frame!r}; expected one of {sorted(_WORLD_TO_POSE)}")
+# ── GAZEBO -> NED (sim odom_to_pose: gazebo ground truth published as NED) ────────────────
+def gazebo_to_ned(gx, gy):
+    """Gazebo (x, y) -> NED (x, y), composing gazebo->world->ned."""
+    return world_to_ned(*gazebo_to_world(gx, gy))
+
+
+def gazebo_yaw_to_ned(yaw):
+    """Gazebo yaw -> NED yaw (gazebo->world is identity, world->ned is 90deg - yaw)."""
+    return world_yaw_to_ned(gazebo_yaw_to_world(yaw))
+
+
+def gazebo_to_ned_pose(gx, gy, yaw):
+    """Gazebo pose (x, y, yaw) -> NED pose (x, y, yaw)."""
+    nx, ny = gazebo_to_ned(gx, gy)
+    return nx, ny, gazebo_yaw_to_ned(yaw)

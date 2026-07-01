@@ -12,7 +12,7 @@ import numpy as np
 
 class MapOverlaySaver(Node):
     """
-    Subscribes once to /raw_map, overlays a transparent grid, and
+    Subscribes once to /camera_image, overlays a transparent grid, and
     stores the composite as map.png in the package share directory.
     """
     def __init__(self):
@@ -41,11 +41,11 @@ class MapOverlaySaver(Node):
         self.camera_matrix = None
         self.dist_coeffs = None
 
-        # Subscribe to raw map
+        # Subscribe to the overhead camera image
         self.sub = self.create_subscription(
             Image,
-            '/raw_map',
-            self._raw_map_cb,
+            '/camera_image',
+            self._camera_image_cb,
             1
         )
         self.camera_info_sub = self.create_subscription(
@@ -61,7 +61,7 @@ class MapOverlaySaver(Node):
         if msg.data == True:
             try:
                 # Convert ROS image → OpenCV → PIL
-                cv_img = self.bridge.imgmsg_to_cv2(self.raw_map, desired_encoding='rgba8')
+                cv_img = self.bridge.imgmsg_to_cv2(self.camera_image, desired_encoding='rgba8')
                 raw_pil = PILImage.fromarray(cv_img).convert("RGBA")
                 raw_pil.save(self.raw_out_path)
                 self.get_logger().debug(f"Raw map image saved to {self.raw_out_path}")
@@ -84,8 +84,8 @@ class MapOverlaySaver(Node):
             except Exception as exc:
                 self.get_logger().error(f"Failed to create overlay: {exc}")
 
-    def _raw_map_cb(self, msg: Image):
-        self.raw_map = msg
+    def _camera_image_cb(self, msg: Image):
+        self.camera_image = msg
 
     def _camera_info_cb(self, msg: CameraInfo):
         self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
