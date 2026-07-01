@@ -9,6 +9,13 @@ from dotenv import load_dotenv
 from ament_index_python.packages import get_package_share_directory
 
 
+# Real-world deployment variant of talking-turtle.launch.py.
+#
+# Identical to the sim launch EXCEPT it omits the two node_Odometry_To_Pose converters.
+# Those only existed to turn the sim's /<robot>/sim_ground_truth_pose (nav_msgs/Odometry)
+# into the /<robot>/ned/pose_stamped (PoseStamped) that control/translator/visualizer
+# consume. In the real world the MoCap system already publishes /<robot>/ned/pose_stamped
+# directly, so no conversion is needed. Everything downstream is unchanged.
 def generate_launch_description():
     pkg_dir = str(get_package_share_directory('talking-turtle'))
     map_file = pkg_dir + '/map.png'
@@ -24,7 +31,7 @@ def generate_launch_description():
     api_key = os.getenv('MY_API_KEY')
     if api_key is None:
         raise RuntimeError(f"MY_API_KEY not found in .env file at {env_path}")
-    
+
     # Define Robot's Name
     bot_name = 'raph'
     bot2_name = 'donnie'   # second robot (blue hat); stubbed control on /donnie/* topics
@@ -64,8 +71,8 @@ def generate_launch_description():
 
     # Control node, does low level control of the robot (drive to goal, etc.).
     # Fully namespaced into raph's topics (symmetric with donnie below): the translator
-    # publishes raph's plan to /raph/waypoint_path and pose comes from /raph/ned/pose_stamped
-    # (published by node_Odometry_To_Pose in sim, or by MoCap directly in the real world).
+    # publishes raph's plan to /raph/waypoint_path and pose comes from the MoCap topic
+    # /raph/ned/pose_stamped (remapped onto the node's /pose_stamped input).
     control_node = GroupAction([
         Node(
             package='talking-turtle',
@@ -74,7 +81,7 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
             parameters=[
-                {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
+                {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
             ],
             remappings=[
                 ('/cmd_vel', '/' + bot_name + '/cmd_vel'),
@@ -84,22 +91,7 @@ def generate_launch_description():
         ),
     ])
 
-    # Odometry to Pose node
-    odometry_to_pose_node = Node(
-            package='talking-turtle',
-            executable='node_Odometry_To_Pose',
-            name='node_Odometry_To_Pose',
-            output='screen',
-            emulate_tty=True,
-            parameters=[
-                {'input_topic': '/' + bot_name + '/sim_ground_truth_pose'},
-            ],
-            remappings=[
-                ('/pose_stamped', '/' + bot_name + '/ned/pose_stamped'),
-            ],
-        )
-
-    # --- Robot 2 (donnie): the same control/odom nodes, remapped into the donnie namespace.
+    # --- Robot 2 (donnie): the same control node, remapped into the donnie namespace.
     # The executive now plans for both robots and the translator routes donnie's plan to
     # /donnie/waypoint_path (it can still be driven manually by publishing there directly).
     control_node_2 = GroupAction([
@@ -110,7 +102,7 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
             parameters=[
-                {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
+                {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
             ],
             remappings=[
                 ('/cmd_vel', '/' + bot2_name + '/cmd_vel'),
@@ -119,20 +111,6 @@ def generate_launch_description():
             ],
         ),
     ])
-
-    odometry_to_pose_node_2 = Node(
-            package='talking-turtle',
-            executable='node_Odometry_To_Pose',
-            name='node_Odometry_To_Pose_2',
-            output='screen',
-            emulate_tty=True,
-            parameters=[
-                {'input_topic': '/' + bot2_name + '/sim_ground_truth_pose'},
-            ],
-            remappings=[
-                ('/pose_stamped', '/' + bot2_name + '/ned/pose_stamped'),
-            ],
-        )
 
     # Translator node, grid coords to MoCap coords
     path_translator_node = Node(
@@ -146,10 +124,10 @@ def generate_launch_description():
             {'debug_dir': debug_dir},
             {'save_debug': True},
             {'robot_names': [bot_name, bot2_name]},
-            {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
+            {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
         ]
     )
-    
+
     # Audio nodes (TTS output + STT input) — only launched when use_audio:=true.
     # They require the `sounddevice` package; off by default so the stack runs quietly.
     use_audio = IfCondition(LaunchConfiguration('use_audio'))
@@ -201,6 +179,23 @@ def generate_launch_description():
         ),
     ])
 
+    # Dummy overhead camera — only when use_dummy_camera:=true. Republishes a static
+    # test image on /ids_overhead/image (the real camera's topic) so the stack has a
+    # frame when no physical camera is connected. Off by default.
+    dummy_camera_node = GroupAction([
+        Node(
+            package='talking-turtle',
+            executable='node_Dummy_Overhead',
+            name='node_Dummy_Overhead',
+            output='screen',
+            emulate_tty=True,
+            parameters=[
+                {'topic': '/ids_overhead/image'},
+                {'rate_hz': 0.5},
+            ],
+        ),
+    ], condition=IfCondition(LaunchConfiguration('use_dummy_camera')))
+
     # Data recording node (optional)
     # Start only when pressed button 2 on joystick
     logger_node = GroupAction([
@@ -229,7 +224,7 @@ def generate_launch_description():
             {'world_path_color': [200, 200, 200]},  # Light gray for reference path
             {'robot_color': [255, 0, 255]},  # Magenta for robot
             {'robot_names': [bot_name, bot2_name]},
-            {'pose_frame': 'gazebo'},   # sim ground-truth poses are in Gazebo axes
+            {'pose_frame': 'ned'},   # real MoCap poses arrive in NED axes
         ],
         remappings=[
             ('/raw_map', '/ids_overhead/image'),
@@ -248,17 +243,20 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'replan_period', default_value='15.0',
             description='Seconds between dynamic replans (used only when replan_mode:=dynamic).'),
+        DeclareLaunchArgument(
+            'use_dummy_camera', default_value='false',
+            description='Publish a static test frame on /ids_overhead/image instead of using '
+                        'the real overhead camera (for testing when the camera is offline).'),
         exec_api_node,
         triage_api_node,
         control_node,
-        odometry_to_pose_node,
         control_node_2,
-        odometry_to_pose_node_2,
         path_translator_node,
         speech_gen_node,
         listener_node,
         # joy_node,   # disabled — see commented joy_node definition above
         mapper_node,
+        dummy_camera_node,
         path_visualizer_node,
         # logger_node,
     ])

@@ -23,7 +23,7 @@ from std_msgs.msg import Float32MultiArray, String
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
-from coord_transform import world_to_pixel, gazebo_to_world
+from coord_transform import world_to_pixel, pose_to_world
 
 
 class PathVisualizer(Node):
@@ -94,17 +94,18 @@ class PathVisualizer(Node):
         self.create_subscription(String, self.path_topic, self._path_callback, 10)
         self.create_subscription(Image, self.raw_map_topic, self._raw_map_callback, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 1)
-        # Per-robot world path + pose. Pose comes from /<name>/pose_stamped (PoseStamped,
-        # published BEST_EFFORT by node_Odometry_To_Pose) — the SAME source control.py and the
-        # translator use. The previous bug subscribed to /<name>/sim_ground_truth_pose, which is
-        # nav_msgs/Odometry, as PoseStamped, so it silently never connected.
+        # Per-robot world path + pose. Pose comes from /<name>/ned/pose_stamped (PoseStamped,
+        # published BEST_EFFORT by node_Odometry_To_Pose in sim, or directly by MoCap in the real
+        # world) — the SAME source control.py and the translator use. The previous bug subscribed
+        # to /<name>/sim_ground_truth_pose, which is nav_msgs/Odometry, as PoseStamped, so it
+        # silently never connected.
         pose_qos = QoSProfile(depth=1)
         pose_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         for name in self.robot_names:
             self.create_subscription(
                 Float32MultiArray, f"/{name}/waypoint_path", self._make_world_path_cb(name), 10)
             self.create_subscription(
-                PoseStamped, f"/{name}/pose_stamped", self._make_pose_cb(name), pose_qos)
+                PoseStamped, f"/{name}/ned/pose_stamped", self._make_pose_cb(name), pose_qos)
 
         self.viz_publisher = self.create_publisher(Image, self.viz_topic, 10)
 
@@ -125,6 +126,12 @@ class PathVisualizer(Node):
         self.declare_parameter("camera_info_topic", "/ids_overhead/camera_info")
         self.declare_parameter("pose_topic", "/raph/sim_ground_truth_pose")
         self.declare_parameter("viz_topic", "/path_visualization")
+
+        # Which frame incoming poses are in: "gazebo" (sim) or "ned" (real MoCap). Set by the
+        # launch file; picks the pose->world transform used to place the robot marker/arrow.
+        self.declare_parameter("pose_frame", "gazebo")
+        self._pose_to_world = pose_to_world(
+            self.get_parameter("pose_frame").get_parameter_value().string_value)
 
         self.declare_parameter("save_overlays", True)
         self.declare_parameter("window_name", "Path Tracking")
@@ -400,28 +407,38 @@ class PathVisualizer(Node):
             self._draw_grid_path(frame, path_pixels, color, name)
 
             # Actual measured trajectory trail (history of poses), drawn DASHED in the robot's
-            # color so it reads distinct from the SOLID planned path. Poses are in the Gazebo
-            # frame, so swap into the camera/world frame to overlay the planned path.
-            traj = [self._world_to_pixel(*gazebo_to_world(hx, hy))
+            # color so it reads distinct from the SOLID planned path. Poses are in the pose
+            # frame (gazebo/ned), so convert into the camera/world frame to overlay the path.
+            traj = [self._world_to_pixel(*self._pose_to_world(hx, hy))
                     for hx, hy in self.pose_history[name]]
             self._draw_dashed_polyline(frame, traj, color, thickness=2)
 
-            # Robot pose from /<name>/pose_stamped.
+            # Robot pose from /<name>/ned/pose_stamped.
             pose_msg = self.latest_pose[name]
             if pose_msg is not None:
                 pose = pose_msg.pose
                 robot_u, robot_v = self._world_to_pixel(
-                    *gazebo_to_world(pose.position.x, pose.position.y))
+                    *self._pose_to_world(pose.position.x, pose.position.y))
                 yaw = self._yaw_from_quaternion(
                     pose.orientation.x,
                     pose.orientation.y,
                     pose.orientation.z,
                     pose.orientation.w,
                 )
+                # The heading must pass through the SAME pose_frame->world->pixel pipeline as the
+                # position (gazebo in sim, ned on hardware — selected by self._pose_to_world).
+                # The image axes differ from the pose frame (e.g. the Gazebo swap / NED flip plus
+                # the inverted row axis), so using the raw yaw directly in pixel space points the
+                # arrow the wrong way. Transform a point one metre ahead of the robot and aim the
+                # arrow from the dot toward it (length is normalised below, so the 1 m step is arbitrary).
+                head_x = pose.position.x + math.cos(yaw)
+                head_y = pose.position.y + math.sin(yaw)
+                head_u, head_v = self._world_to_pixel(*self._pose_to_world(head_x, head_y))
+                pixel_yaw = math.atan2(head_v - robot_v, head_u - robot_u)
                 arrow_len = 30
                 tip = (
-                    int(robot_u + arrow_len * math.cos(yaw)),
-                    int(robot_v + arrow_len * math.sin(yaw)),
+                    int(robot_u + arrow_len * math.cos(pixel_yaw)),
+                    int(robot_v + arrow_len * math.sin(pixel_yaw)),
                 )
                 cv2.circle(frame, (robot_u, robot_v), 10, color, -1)
                 cv2.arrowedLine(frame, (robot_u, robot_v), tip, (255, 255, 255), 5, tipLength=0.5)

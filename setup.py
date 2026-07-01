@@ -50,6 +50,7 @@ setup(
             'node_Path_Visualizer = node_Path_Visualizer.path_visualizer:main',
             'node_Trajectory_Logger = node_Path_Translator.logger_node:main',
             'node_Odometry_To_Pose = node_Path_Translator.odom_to_pose:main',
+            'node_Dummy_Overhead = node_Dummy_Overhead.dummy_overhead:main',
             'obs_seg_cli = obs_seg.cli:main',
         ],
     },

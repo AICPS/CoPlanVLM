@@ -10,3 +10,12 @@ torchvision
 transformers
 opencv-python
 numpy
+
+# Planning / imaging / plotting used across the nodes and scripts
+scipy
+matplotlib
+pandas
+Pillow>=9.1.0   # >=9.1 for PIL.Image.Resampling, required by recent transformers
+
+# Audio nodes (node_Speech_Gen / node_Listener, only when use_audio:=true)
+sounddevice

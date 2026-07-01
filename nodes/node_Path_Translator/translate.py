@@ -34,7 +34,7 @@ from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
-from coord_transform import gazebo_to_world
+from coord_transform import pose_to_world
 from obs_seg import FREE, OCCUPIED, UNKNOWN
 from obs_seg.segmenter import TraversabilitySegmenter
 from obs_seg.occupancy import mask_to_occupancy
@@ -61,6 +61,12 @@ class SimplePathTranslator(Node):
         self.declare_parameter("path_topic", "/grid_path")
         # One robot per entry; each robot's plan is published to /<name>/waypoint_path.
         self.declare_parameter("robot_names", ["raph", "donnie"])
+
+        # Which frame incoming poses are in: "gazebo" (sim ground truth) or "ned" (real MoCap).
+        # Set by the launch file (sim vs deploy); picks the pose->world transform used below.
+        self.declare_parameter("pose_frame", "gazebo")
+        pose_frame = self.get_parameter("pose_frame").get_parameter_value().string_value
+        self._pose_to_world = pose_to_world(pose_frame)
 
         # ─── Obstacle-aware planning params ───────────────────────────────────
         self.declare_parameter("image_topic", "/ids_overhead/image")
@@ -137,21 +143,21 @@ class SimplePathTranslator(Node):
         }
 
         # Cache each robot's latest world (x, y) so every plan starts at the robot's current
-        # position. /<name>/pose_stamped is published BEST_EFFORT, so match that QoS.
+        # position. /<name>/ned/pose_stamped is published BEST_EFFORT, so match that QoS.
         pose_qos = QoSProfile(depth=1)
         pose_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self.robot_xy: Dict[str, object] = {name: None for name in self.robot_names}
         for name in self.robot_names:
             self.create_subscription(
-                PoseStamped, f"/{name}/pose_stamped", self._make_pose_cb(name), pose_qos)
+                PoseStamped, f"/{name}/ned/pose_stamped", self._make_pose_cb(name), pose_qos)
 
         self.get_logger().info("✓")
 
     # ------------------------------------------------------------------
     def _make_pose_cb(self, name: str):
-        """Cache the robot's position in the world frame (Gazebo pose swapped via gazebo_to_world)."""
+        """Cache the robot's position in the world frame (pose converted via the pose_frame transform)."""
         def _cb(msg: PoseStamped) -> None:
-            self.robot_xy[name] = gazebo_to_world(msg.pose.position.x, msg.pose.position.y)
+            self.robot_xy[name] = self._pose_to_world(msg.pose.position.x, msg.pose.position.y)
         return _cb
 
     # ------------------------------------------------------------------

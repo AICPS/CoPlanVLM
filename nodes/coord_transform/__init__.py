@@ -69,3 +69,48 @@ def world_to_gazebo(x, y):
     becomes more than a swap.
     """
     return y, x
+
+
+def ned_to_world(x, y):
+    """MoCap NED pose frame -> camera/world (image) frame.
+
+    Empirically, on the overhead image the MoCap North (+x) axis points toward the BOTTOM
+    of the image and East (+y) points to the LEFT — i.e. NED is anti-aligned with the
+    camera/world frame (whose +x is image-up and +y is image-right, per world_to_pixel).
+    So the conversion is a 180-degree in-plane flip: (x, y) -> (-x, -y). world_to_ned is
+    the inverse (negation is its own inverse).
+
+    NOTE: like gazebo_to_world this captures axis DIRECTION only and carries NO origin
+    offset (it assumes the MoCap origin coincides with the camera nadir / world origin). If
+    the two origins differ, add the measured (dx, dy) offset here.
+    """
+    return -x, -y
+
+
+def world_to_ned(x, y):
+    """Camera/world (image) frame -> MoCap NED pose frame. Inverse of ned_to_world."""
+    return -x, -y
+
+
+# ── Pose-frame selection ─────────────────────────────────────────────────────────────────
+# The robot's raw pose arrives in "gazebo" axes in sim and "ned" axes on real hardware
+# (MoCap). Nodes take a pose_frame parameter and look up the matching transform here, so the
+# same code path serves both without hardcoding a frame.
+_POSE_TO_WORLD = {"gazebo": gazebo_to_world, "ned": ned_to_world}
+_WORLD_TO_POSE = {"gazebo": world_to_gazebo, "ned": world_to_ned}
+
+
+def pose_to_world(frame):
+    """Return the pose-frame->world transform for frame ('gazebo' or 'ned')."""
+    try:
+        return _POSE_TO_WORLD[frame]
+    except KeyError:
+        raise ValueError(f"unknown pose_frame {frame!r}; expected one of {sorted(_POSE_TO_WORLD)}")
+
+
+def world_to_pose(frame):
+    """Return the world->pose-frame transform for frame ('gazebo' or 'ned')."""
+    try:
+        return _WORLD_TO_POSE[frame]
+    except KeyError:
+        raise ValueError(f"unknown pose_frame {frame!r}; expected one of {sorted(_WORLD_TO_POSE)}")

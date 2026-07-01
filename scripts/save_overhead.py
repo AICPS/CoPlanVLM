@@ -11,7 +11,7 @@ Usage (from workspace root, after 'source install/setup.bash'):
 Output:
     <out>/overhead.png   — BGR image from /ids_overhead/image (typically 1936x1216)
     <out>/poses.json     — {"raph": {"x": ..., "y": ...}, "donnie": {"x": ..., "y": ...}}
-                           Raw Gazebo coordinates as received on /<robot>/pose_stamped.
+                           Raw Gazebo coordinates as received on /<robot>/ned/pose_stamped.
                            test_pipeline.py applies gazebo_to_world() to match translate.py.
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ class OverheadSaver(Node):
         for name in robot_names:
             self.create_subscription(
                 PoseStamped,
-                f"/{name}/pose_stamped",
+                f"/{name}/ned/pose_stamped",
                 self._make_pose_cb(name),
                 best_effort_qos,
             )

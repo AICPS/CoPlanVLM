@@ -10,7 +10,16 @@ from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Twist, PoseStamped
 from tf_transformations import euler_from_quaternion
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from coord_transform import world_to_gazebo
+from coord_transform import world_to_pose
+
+# ── Tunable defaults ─────────────────────────────────────────────────────────────────────
+# The controller's tunable knobs, surfaced here for easy adjustment. Each is also exposed as a
+# ROS parameter (same name, lower-case) so it can be overridden from the launch file or at
+# runtime (`ros2 param set ...`) without editing this file.
+DEFAULT_MAX_LINEAR_VEL = 0.15     # m/s   — forward speed clamp (conservative for bring-up)
+DEFAULT_MAX_ANGULAR_VEL = 0.25    # rad/s — turn-rate clamp (conservative for bring-up)
+DEFAULT_HEADING_GATE_DEG = 60.0   # deg   — only drive forward once heading error is within this
+
 
 class ControlNode(Node):
     """Contains node to move turtlebot from the specified location into the parking space."""
@@ -32,9 +41,27 @@ class ControlNode(Node):
         self.goal_coordinates = None
         self.goal_yaw = None
 
+        # Which frame the robot's pose is in: "gazebo" (sim) or "ned" (real MoCap). Set by the
+        # launch file; selects the world->pose transform used to convert goals into the pose frame.
+        self.declare_parameter("pose_frame", "gazebo")
+        pose_frame = self.get_parameter("pose_frame").get_parameter_value().string_value
+        self._world_to_pose = world_to_pose(pose_frame)
+
         # kP constant value.
         self.kP_val = 0.5
         self.kP_pos = 0.75
+
+        # Tunable knobs (defaults live at the top of this file). All are ROS parameters, so they
+        # can be overridden from the launch file or at runtime without a rebuild.
+        # - max_linear_vel / max_angular_vel: conservative output clamps applied before publishing.
+        # - heading_gate_deg: only drive forward once |heading error| is within this angle.
+        self.declare_parameter("max_linear_vel", DEFAULT_MAX_LINEAR_VEL)      # m/s
+        self.declare_parameter("max_angular_vel", DEFAULT_MAX_ANGULAR_VEL)    # rad/s
+        self.declare_parameter("heading_gate_deg", DEFAULT_HEADING_GATE_DEG)  # deg
+        self.max_linear_vel = self.get_parameter("max_linear_vel").get_parameter_value().double_value
+        self.max_angular_vel = self.get_parameter("max_angular_vel").get_parameter_value().double_value
+        self.heading_gate_rad = math.radians(
+            self.get_parameter("heading_gate_deg").get_parameter_value().double_value)
 
         # Holds the error between the current pose & goal pose readings
         self.pose_error = None
@@ -90,9 +117,9 @@ class ControlNode(Node):
         # Get current odometer reading's x & y variables.
         current_pose = self.current_pose.pose.position
 
-        # The waypoint is in camera/world (image) axes; convert it into the Gazebo frame the
-        # pose is in (gazebo x,y correspond to camera/world y,x — a pure x<->y swap).
-        goal_x, goal_y = world_to_gazebo(self.goal_coordinates[0], self.goal_coordinates[1])
+        # The waypoint is in camera/world (image) axes; convert it into the pose frame (gazebo
+        # in sim, ned on real hardware) so it can be compared against the raw pose reading.
+        goal_x, goal_y = self._world_to_pose(self.goal_coordinates[0], self.goal_coordinates[1])
 
         # Calc x & y differences between pose reading & Goal position.
         x_difference = goal_x - current_pose.x
@@ -121,7 +148,8 @@ class ControlNode(Node):
         # Calculate the yaw error (amount to rotate)
         self.current_yaw = self.cur_yaw_euler[2]
         relative_yaw = math.atan2(y_difference, x_difference)
-        self.yaw_error = relative_yaw - self.current_yaw
+        # self.yaw_error = relative_yaw - self.current_yaw
+        self.yaw_error = -relative_yaw + self.current_yaw
 
     def publish_velocity(self):
         """Publishes the linear and angular velocity commands to the hardware."""
@@ -139,12 +167,12 @@ class ControlNode(Node):
         car = self.pose_error.pose.position
         error_distance = math.sqrt(car.x ** 2 + car.y ** 2)
 
-        # Heading gate: only drive forward when roughly facing the goal. If the heading
-        # error exceeds 60°, command zero linear velocity and just rotate toward the goal
+        # Heading gate: only drive forward when roughly facing the goal. If the heading error
+        # exceeds heading_gate_deg, command zero linear velocity and just rotate toward the goal
         # (prevents wide arcs that cut corners / clip obstacles). yaw_error is wrapped to
         # [-pi, pi] so the comparison reflects the true signed heading error.
         wrapped_yaw_err = math.atan2(math.sin(self.yaw_error), math.cos(self.yaw_error))
-        if abs(wrapped_yaw_err) > math.radians(60):
+        if abs(wrapped_yaw_err) > self.heading_gate_rad:
             self.command.linear.x = 0.0
         else:
             self.command.linear.x = self.kP_pos * error_distance
@@ -158,6 +186,13 @@ class ControlNode(Node):
                 self.command.linear.x = 0.0
                 self.command.angular.z = 0.0
             self.parked = True
+
+        # Final safety clamp: cap both commands to the conservative limits before publishing,
+        # so no combination of gain * error can send the robot an unsafe velocity.
+        self.command.linear.x = max(-self.max_linear_vel,
+                                    min(self.max_linear_vel, self.command.linear.x))
+        self.command.angular.z = max(-self.max_angular_vel,
+                                     min(self.max_angular_vel, self.command.angular.z))
 
         # Publish the updated velocity command values to the bot.
         self.velocity_publisher.publish(self.command)
