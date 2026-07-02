@@ -20,8 +20,9 @@ def generate_launch_description():
     pkg_dir = str(get_package_share_directory('talking-turtle'))
     map_file = pkg_dir + '/map.png'
     grid_csv_path = pkg_dir + '/config/grid_cell_centers.csv'
-    # Debug artifacts dir (hardcoded; workspace-level, outside the git repo & install tree).
-    debug_dir = os.path.expanduser('~/projects/turtle4_ws/debug')
+    # Debug artifacts dir, resolved relative to this package (a `debug/` folder at the package
+    # root, alongside launch/ and config/). Same __file__-relative pattern as config/.env below.
+    debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'debug'))
 
     # Load environment variables from .env
     env_path = os.path.join(os.path.dirname(__file__), '..', 'config/.env')
