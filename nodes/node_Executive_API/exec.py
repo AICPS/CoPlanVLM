@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Executive API Node — Path‑Planning Edition (Responses API + o4‑mini)
+Executive API Node — Path‑Planning Edition (Responses API + o4‑mini)
 ===================================================================
-Receives a JSON snapshot of the TurtleBot4’s Battleship‑grid world plus
-an operator goal prompt, forwards it to OpenAI’s **Responses API**
+Receives a JSON snapshot of the TurtleBot4's Battleship‑grid world plus
+an operator goal prompt, forwards it to OpenAI's **Responses API**
 (`o4‑mini`), and publishes:
 
 * **`/grid_path`** – the selected route(s) (JSON object of per-robot grid-cell labels).
@@ -19,15 +19,23 @@ No chat history is stored – each call is stateless.
 
 from __future__ import annotations
 
+import base64
+import io
 import json
+import os
 import re
+
+import cv2
+import numpy as np
 import rclpy
 from rclpy.node import Node
 import rclpy.wait_for_message
-from std_msgs.msg import String, Bool
+from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import String
+from cv_bridge import CvBridge
 from openai import OpenAI
-import base64
-from time import sleep
+from PIL import Image as PILImage
+from ament_index_python.packages import get_package_share_directory
 
 from node_Executive_API.prompt import EXECUTIVE_SYSTEM_PROMPT
 
@@ -47,8 +55,8 @@ class ExecutiveApiNode(Node):
         self.declare_parameter('nav_prompt_topic', '/nav/prompt')  # ⇐ input
         self.declare_parameter('exec_path_topic',  '/grid_path')     # ⇐ output
         self.declare_parameter('exec_status_topic', '/nav/status')   # ⇐ output
-        self.declare_parameter('need_map_topic', '/need_map')   # ⇐ output
-        self.declare_parameter('map_path', '')
+        self.declare_parameter('camera_image_topic', '/camera_image')
+        self.declare_parameter('camera_info_topic', '/ids_overhead/camera_info')
         self.declare_parameter('robot_names', ['raph', 'donnie'])  # roster the planner must cover
         self.declare_parameter('temperature', 0.0)               # 0 = deterministic
         # Replanning strategy: "static" plans once per prompt; "dynamic" re-runs the same prompt
@@ -65,24 +73,34 @@ class ExecutiveApiNode(Node):
         self.nav_prompt_topic: str = self.get_parameter('nav_prompt_topic').value
         self.exec_path_topic: str   = self.get_parameter('exec_path_topic').value
         self.exec_status_topic: str = self.get_parameter('exec_status_topic').value
-        self.need_map_topic: str = self.get_parameter('need_map_topic').value
-        self.map_path: str   = self.get_parameter('map_path').value
+        self.camera_image_topic: str = self.get_parameter('camera_image_topic').value
+        self.camera_info_topic: str = self.get_parameter('camera_info_topic').value
         self.replan_mode: str = self.get_parameter('replan_mode').value
         self.replan_period: float = float(self.get_parameter('replan_period').value)
-
 
         # ---------- OpenAI client ----------
         self.client = OpenAI(api_key=self.api_key or None)
         if not self.api_key:
             self.get_logger().warn('OpenAI API key not set — planner disabled.')
 
+        # ---------- Camera / map state ----------
+        self.bridge = CvBridge()
+        self.camera_image: Image | None = None
+        self.camera_matrix: np.ndarray | None = None
+        self.dist_coeffs: np.ndarray | None = None
+
+        pkg_dir = get_package_share_directory('talking-turtle')
+        grid_path = os.path.join(pkg_dir, 'config', 'transparent_grid.png')
+        self.grid_img = PILImage.open(grid_path).convert("RGBA")
+
         # ---------- ROS pubs/subs ----------
         self.path_pub   = self.create_publisher(String, self.exec_path_topic, 10)
-        self.need_map_pub   = self.create_publisher(Bool, self.need_map_topic, 10)
         self.status_pub = self.create_publisher(String, self.exec_status_topic, 10)
         self.prompt_sub = self.create_subscription(
             String, self.nav_prompt_topic, self.prompt_callback, 10
         )
+        self.create_subscription(Image, self.camera_image_topic, self._camera_image_cb, 1)
+        self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_cb, 1)
 
         # ---------- Replan trigger state ----------
         # current_prompt holds the latest operator goal (already suffixed with '\n\njson'); the
@@ -103,7 +121,7 @@ class ExecutiveApiNode(Node):
 
         self.get_logger().info("✓")
 
-        
+
     # ------------------------------------------------------------------
     # Callback: handle incoming prompt and plan
     # ------------------------------------------------------------------
@@ -143,13 +161,11 @@ class ExecutiveApiNode(Node):
             self._publish_status(False, 'API key missing')
             return
 
-        # NOTE: single-threaded executor — the sleep(5) + VLM call below blocks this node's
-        # callbacks (incl. /nav/prompt) until it returns. A timer cannot re-enter while a plan is
-        # in flight, so replans never overlap. Acceptable for this use.
+        # NOTE: single-threaded executor — the VLM call below blocks this node's callbacks
+        # (incl. /nav/prompt) until it returns. A timer cannot re-enter while a plan is in
+        # flight, so replans never overlap. Acceptable for this use.
         try:
-            self._need_map_pub(True)
-            sleep(5)
-            self.map = self._encode_image(self.map_path)
+            map_b64 = self._generate_map()
 
             response = self.client.responses.create(
                 model=self.model,
@@ -168,13 +184,12 @@ class ExecutiveApiNode(Node):
                             { "type": "input_text", "text": self.current_prompt },
                             {
                                 "type": "input_image",
-                                "image_url": f"data:image/png;base64,{self.map}",
+                                "image_url": f"data:image/png;base64,{map_b64}",
                             },
                         ],
                     }
                 ],
             )
-            self._need_map_pub(False)
             reply_json: str = response.output_text.strip()
 
             # ------------- safe JSON parse -------------
@@ -221,6 +236,32 @@ class ExecutiveApiNode(Node):
             self._publish_status(False, str(exc))
 
     # ------------------------------------------------------------------
+    # Camera callbacks
+    # ------------------------------------------------------------------
+    def _camera_image_cb(self, msg: Image) -> None:
+        self.camera_image = msg
+
+    def _camera_info_cb(self, msg: CameraInfo) -> None:
+        self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
+        self.dist_coeffs = np.array(msg.d, dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # Helper: generate grid-overlay map as base64 PNG (in memory)
+    # ------------------------------------------------------------------
+    def _generate_map(self) -> str:
+        if self.camera_image is None:
+            raise RuntimeError("No camera image received yet — is the camera publishing?")
+        cv_img = self.bridge.imgmsg_to_cv2(self.camera_image, desired_encoding='rgba8')
+        if self.camera_matrix is not None and self.dist_coeffs is not None:
+            cv_img = cv2.undistort(cv_img, self.camera_matrix, self.dist_coeffs)
+        pil_img = PILImage.fromarray(cv_img).convert("RGBA")
+        grid_resized = self.grid_img.resize(pil_img.size)
+        combined = PILImage.alpha_composite(pil_img, grid_resized)
+        buf = io.BytesIO()
+        combined.save(buf, format='PNG')
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+    # ------------------------------------------------------------------
     # Helper: publish status
     # ------------------------------------------------------------------
     def _publish_status(self, success: bool, detail: str | None = None) -> None:
@@ -233,12 +274,6 @@ class ExecutiveApiNode(Node):
         status_msg = String()
         status_msg.data = json.dumps(status_obj)
         self.status_pub.publish(status_msg)
-
-
-    def _need_map_pub(self, need: bool) -> None:
-        need_msg = Bool()
-        need_msg.data = need
-        self.need_map_pub.publish(need_msg)
 
     # ------------------------------------------------------------------
     # Helper: parse the model reply as JSON, tolerating fences / extra prose
@@ -270,13 +305,6 @@ class ExecutiveApiNode(Node):
             except json.JSONDecodeError:
                 pass
         return None
-
-    # ------------------------------------------------------------------
-    # Function to encode the image
-    # ------------------------------------------------------------------
-    def _encode_image(self, image_path: str) -> str:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
 
 
 # ----------------------------------------------------------------------

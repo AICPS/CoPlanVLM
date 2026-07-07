@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from ament_index_python.packages import get_package_share_directory
 
 
-# Real-world deployment variant of talking-turtle.launch.py.
+# Real-world deployment variant of talking-turtle-4sim.launch.py.
 #
 # Identical to the sim launch EXCEPT it omits the two node_Odometry_To_Pose converters.
 # Those only existed to turn the sim's /<robot>/sim_ground_truth_pose (nav_msgs/Odometry)
@@ -18,7 +18,6 @@ from ament_index_python.packages import get_package_share_directory
 # directly, so no conversion is needed. Everything downstream is unchanged.
 def generate_launch_description():
     pkg_dir = str(get_package_share_directory('talking-turtle'))
-    map_file = pkg_dir + '/map.png'
     grid_csv_path = pkg_dir + '/config/grid_cell_centers.csv'
     # Debug artifacts dir, resolved relative to this package (a `debug/` folder at the package
     # root, alongside launch/ and config/). Same __file__-relative pattern as config/.env below.
@@ -47,11 +46,14 @@ def generate_launch_description():
             emulate_tty=True,
             parameters=[
                 {'openai_api_key': api_key},
-                {'map_path': map_file},
                 {'robot_names': [bot_name, bot2_name]},
                 {'replan_mode': LaunchConfiguration('replan_mode')},
                 {'replan_period': ParameterValue(
                     LaunchConfiguration('replan_period'), value_type=float)},
+                {'camera_info_topic': '/ueye/test/camera_info'},
+            ],
+            remappings=[
+                ('/camera_image', '/ueye/test/image_raw'),
             ],
         ),
     ])
@@ -162,36 +164,6 @@ def generate_launch_description():
     #     name='joy_node'
     # )
 
-    mapper_node = GroupAction([
-        Node(
-            package='talking-turtle',
-            executable='node_Map_Gen',
-            name='node_Map_Gen',
-            output='screen',
-            emulate_tty=True,
-              remappings=[
-                ('/camera_image', '/ueye/test/image_raw'),
-            ],
-        ),
-    ])
-
-    # Dummy overhead camera — only when use_dummy_camera:=true. Republishes a static
-    # test image on /ueye/test/image_raw (the real camera's topic) so the stack has a
-    # frame when no physical camera is connected. Off by default.
-    dummy_camera_node = GroupAction([
-        Node(
-            package='talking-turtle',
-            executable='node_Dummy_Overhead',
-            name='node_Dummy_Overhead',
-            output='screen',
-            emulate_tty=True,
-            parameters=[
-                {'topic': '/ueye/test/image_raw'},
-                {'rate_hz': 0.5},
-            ],
-        ),
-    ], condition=IfCondition(LaunchConfiguration('use_dummy_camera')))
-
     # Data recording node (optional)
     # Start only when pressed button 2 on joystick
     logger_node = GroupAction([
@@ -239,10 +211,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'replan_period', default_value='15.0',
             description='Seconds between dynamic replans (used only when replan_mode:=dynamic).'),
-        DeclareLaunchArgument(
-            'use_dummy_camera', default_value='false',
-            description='Publish a static test frame on /ueye/test/image_raw instead of using '
-                        'the real overhead camera (for testing when the camera is offline).'),
         exec_api_node,
         triage_api_node,
         control_node,
@@ -251,8 +219,6 @@ def generate_launch_description():
         speech_gen_node,
         listener_node,
         # joy_node,   # disabled — see commented joy_node definition above
-        mapper_node,
-        dummy_camera_node,
         path_visualizer_node,
         # logger_node,
     ])

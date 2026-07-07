@@ -50,7 +50,6 @@ setup(
             'node_Path_Translator = node_Path_Translator.translate:main',
             'node_Speech_Gen = node_Speech_Gen.speech:main',
             'node_Listener = node_Listener.ear:main',
-            'node_Map_Gen = node_Map_Gen.mapper:main',
             'node_Path_Visualizer = node_Path_Visualizer.path_visualizer:main',
             'node_Trajectory_Logger = node_Path_Translator.logger_node:main',
             'node_Odometry_To_Pose = node_Path_Translator.odom_to_pose:main',
