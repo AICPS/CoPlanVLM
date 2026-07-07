@@ -3,7 +3,7 @@
 
 Loads a static image once and republishes it as sensor_msgs/Image on the same
 topic the real overhead camera uses (/ids_overhead/image), so the rest of the
-stack (node_Map_Gen, node_Path_Visualizer, node_Path_Translator) sees a frame
+stack (node_Executive_API, node_Path_Visualizer, node_Path_Translator) sees a frame
 even when no physical camera is connected.
 
 Run standalone (no rebuild needed):

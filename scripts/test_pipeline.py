@@ -94,7 +94,7 @@ def _parse_json_reply(text: str) -> dict | None:
 
 
 def _composite_grid(img_bgr: np.ndarray, grid_overlay: np.ndarray | None) -> np.ndarray:
-    """Alpha-composite the transparent grid onto the image, mirroring mapper.py."""
+    """Alpha-composite the transparent grid onto the image."""
     if grid_overlay is None:
         return img_bgr
     g = cv2.resize(grid_overlay, (img_bgr.shape[1], img_bgr.shape[0]))
@@ -106,7 +106,7 @@ def _composite_grid(img_bgr: np.ndarray, grid_overlay: np.ndarray | None) -> np.
 
 def _call_vlm(prompt: str, img_bgr: np.ndarray, grid_overlay: np.ndarray | None,
               model: str, temperature: float = 0.0) -> dict:
-    """Call GPT-4o with the grid-overlaid overhead image (mirrors exec.py + mapper.py)."""
+    """Call GPT-4o with the grid-overlaid overhead image."""
     try:
         from openai import OpenAI
     except ImportError:
