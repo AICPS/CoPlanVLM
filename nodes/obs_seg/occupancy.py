@@ -52,20 +52,22 @@ def cell_to_world(gx, gy, meta) -> Tuple[float, float]:
 
 
 def mask_to_occupancy(pix_labels: np.ndarray,
-                      resolution: float) -> Tuple[np.ndarray, dict]:
+                      resolution: float,
+                      camera: str = None) -> Tuple[np.ndarray, dict]:
     """Resample a pixel label map into a metric OccupancyGrid array.
 
-    pix_labels : int8 (H_img, W_img) with values FREE / OCCUPIED / UNKNOWN. The pixel->world
-    calibration lives entirely in coord_transform. Returns (grid int8 (H, W), meta) where
-    grid[gy, gx] uses FREE/OCCUPIED/UNKNOWN and meta = {resolution, origin_x, origin_y, width,
-    height}. grid is row-major in (gy, gx); flatten C-order to fill nav_msgs/OccupancyGrid.data.
+    pix_labels : int8 (H_img, W_img) with values FREE / OCCUPIED / UNKNOWN. `camera` selects
+    the pixel->world calibration (e.g. "gazebo", "lab_test") — must be provided explicitly.
+    Returns (grid int8 (H, W), meta) where grid[gy, gx] uses FREE/OCCUPIED/UNKNOWN and
+    meta = {resolution, origin_x, origin_y, width, height}. grid is row-major in (gy, gx);
+    flatten C-order to fill nav_msgs/OccupancyGrid.data.
     """
     h_img, w_img = pix_labels.shape
 
     # world extent from the four image corners (transform is axis-aligned)
     cu = np.array([0, w_img - 1, 0, w_img - 1], dtype=float)
     cv = np.array([0, 0, h_img - 1, h_img - 1], dtype=float)
-    cx, cy = pixel_to_world(cu, cv)
+    cx, cy = pixel_to_world(cu, cv, camera=camera)
     x_min, x_max = float(cx.min()), float(cx.max())
     y_min, y_max = float(cy.min()), float(cy.max())
 
@@ -74,7 +76,7 @@ def mask_to_occupancy(pix_labels: np.ndarray,
 
     # world coord of every pixel, then its target cell index
     uu, vv = np.meshgrid(np.arange(w_img), np.arange(h_img))
-    xs, ys = pixel_to_world(uu, vv)
+    xs, ys = pixel_to_world(uu, vv, camera=camera)
     gx = np.floor((xs - x_min) / resolution).astype(np.int64)
     gy = np.floor((ys - y_min) / resolution).astype(np.int64)
     in_bounds = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)

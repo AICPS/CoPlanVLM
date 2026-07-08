@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 """
-Executive API Node — Path‑Planning Edition (Responses API + o4‑mini)
+Executive API Node — Adaptive Path‑Planning Edition (Responses API)
 ===================================================================
-Receives a JSON snapshot of the TurtleBot4's Battleship‑grid world plus
-an operator goal prompt, forwards it to OpenAI's **Responses API**
-(`o4‑mini`), and publishes:
+Receives an operator goal prompt on `/nav/prompt`, and plans in two LLM
+calls:
+
+1. **Classifier** — a text‑only call tags the instruction with a task
+   type (`nav2point` / `manouver` / `coverage`; see prompt_gen.py).
+2. **Planner** — a vision call that, given the selected per‑task system
+   prompt and an overhead grid image, returns the route(s).
+
+Publishes:
 
 * **`/grid_path`** – the selected route(s) (JSON object of per-robot grid-cell labels).
-* **`/nav/status`** – a compact JSON object consumed by the triage node.
 
-Unlike earlier versions, **all task instructions now live on the
-OpenAI server**.  The node simply forwards the snapshot (as `input=`)
-and expects a strict‑JSON reply containing `path` and either
-`analysis` *(on success)* or an error description *(on failure)*.
+The task type selects both the system prompt (`prompt_gen.PROMPT_BUILDERS`)
+and the map overlay (`map_gen.MAP_BUILDERS`).
 
 No chat history is stored – each call is stateless.
 """
 
 from __future__ import annotations
 
-import base64
-import io
 import json
-import os
 import re
 
-import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -34,10 +33,13 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 from openai import OpenAI
-from PIL import Image as PILImage
-from ament_index_python.packages import get_package_share_directory
 
-from node_Executive_API.prompt import EXECUTIVE_SYSTEM_PROMPT
+from node_Executive_API.prompt_gen import (
+    EXECUTIVE_SYSTEM_PROMPT,
+    PROMPT_BUILDERS,
+    CLASSIFIER_SYSTEM_PROMPT,
+)
+from node_Executive_API.map_gen import MAP_BUILDERS, run_segmentation
 
 # ----------------------------------------------------------------------
 # Node definition
@@ -54,7 +56,6 @@ class ExecutiveApiNode(Node):
         self.declare_parameter('model', 'gpt-4o')                   # vision-capable planner model
         self.declare_parameter('nav_prompt_topic', '/nav/prompt')  # ⇐ input
         self.declare_parameter('exec_path_topic',  '/grid_path')     # ⇐ output
-        self.declare_parameter('exec_status_topic', '/nav/status')   # ⇐ output
         self.declare_parameter('camera_image_topic', '/camera_image')
         self.declare_parameter('camera_info_topic', '/ids_overhead/camera_info')
         self.declare_parameter('robot_names', ['raph', 'donnie'])  # roster the planner must cover
@@ -63,8 +64,10 @@ class ExecutiveApiNode(Node):
         # at replan_period seconds until a new prompt arrives. Future modes (event-driven, …) add
         # their own trigger that also calls _run_plan() — the VLM call body is never duplicated.
         self.declare_parameter('replan_mode', 'static')          # "static" | "dynamic"
-        self.declare_parameter('replan_period', 15.0)            # seconds between dynamic replans
-
+        self.declare_parameter('replan_period', 120)            # seconds between dynamic replans
+        # Camera calibration key and occupancy grid resolution (passed to map builders via self).
+        self.declare_parameter('camera', 'gazebo')              # "gazebo" | "lab_test"
+        self.declare_parameter('resolution', 0.05)              # m / occupancy cell
 
         self.robot_names: list[str] = list(self.get_parameter('robot_names').value)
         self.api_key: str   = self.get_parameter('openai_api_key').value
@@ -72,32 +75,29 @@ class ExecutiveApiNode(Node):
         self.temperature: float = self.get_parameter('temperature').value
         self.nav_prompt_topic: str = self.get_parameter('nav_prompt_topic').value
         self.exec_path_topic: str   = self.get_parameter('exec_path_topic').value
-        self.exec_status_topic: str = self.get_parameter('exec_status_topic').value
         self.camera_image_topic: str = self.get_parameter('camera_image_topic').value
         self.camera_info_topic: str = self.get_parameter('camera_info_topic').value
         self.replan_mode: str = self.get_parameter('replan_mode').value
         self.replan_period: float = float(self.get_parameter('replan_period').value)
+        self.camera_name: str = self.get_parameter('camera').get_parameter_value().string_value
+        self.resolution: float = float(self.get_parameter('resolution').value)
 
         # ---------- OpenAI client ----------
         self.client = OpenAI(api_key=self.api_key or None)
         if not self.api_key:
             self.get_logger().warn('OpenAI API key not set — planner disabled.')
 
-        # ---------- Camera / map state ----------
+        # ---------- Camera state ----------
+        # Live overhead camera inputs read by the map builders in map_gen.py.
         self.bridge = CvBridge()
         self.camera_image: Image | None = None
         self.camera_matrix: np.ndarray | None = None
         self.dist_coeffs: np.ndarray | None = None
 
-        pkg_dir = get_package_share_directory('talking-turtle')
-        grid_path = os.path.join(pkg_dir, 'config', 'transparent_grid.png')
-        self.grid_img = PILImage.open(grid_path).convert("RGBA")
-
         # ---------- ROS pubs/subs ----------
-        self.path_pub   = self.create_publisher(String, self.exec_path_topic, 10)
-        self.status_pub = self.create_publisher(String, self.exec_status_topic, 10)
+        self.path_pub   = self.create_publisher(String, self.exec_path_topic, 1)
         self.prompt_sub = self.create_subscription(
-            String, self.nav_prompt_topic, self.prompt_callback, 10
+            String, self.nav_prompt_topic, self.prompt_callback, 1
         )
         self.create_subscription(Image, self.camera_image_topic, self._camera_image_cb, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_cb, 1)
@@ -107,6 +107,10 @@ class ExecutiveApiNode(Node):
         # dynamic-mode timer re-plans against whatever this currently holds, so "replan unless the
         # prompt changed" needs no extra bookkeeping — a new prompt simply overwrites it.
         self.current_prompt: str | None = None
+        # Task type chosen by the classifier for the current prompt; drives both the system prompt
+        # (PROMPT_BUILDERS) and the map overlay (MAP_BUILDERS).
+        self.current_task_type: str | None = None
+        self.pix_labels: np.ndarray | None = None
         self._timer = None
         if self.replan_mode not in ('static', 'dynamic'):
             self.get_logger().warn(
@@ -118,8 +122,6 @@ class ExecutiveApiNode(Node):
                 f"[exec] dynamic replanning every {self.replan_period:.1f}s")
         else:
             self.get_logger().info("[exec] static planning (one plan per prompt)")
-
-        self.get_logger().info("✓")
 
 
     # ------------------------------------------------------------------
@@ -134,6 +136,14 @@ class ExecutiveApiNode(Node):
         """
         self.get_logger().info(f"[exec] received /nav/prompt: {msg.data!r}")
         self.current_prompt = msg.data + '\n\njson'
+
+        # Classify once per new prompt (not per replan tick): the task type doesn't change between
+        # dynamic replans of the same instruction, so we stash it and reuse it in _run_plan().
+        self.current_task_type = self._classify_task(msg.data)
+        if self.current_task_type is None:
+            self.get_logger().error("[exec] could not classify task type — skipping plan.")
+            return
+        self.get_logger().info(f"[exec] task type: {self.current_task_type}")
 
         if self.replan_mode == 'dynamic' and self._timer is not None:
             self._timer.reset()  # restart the period from this prompt
@@ -151,32 +161,39 @@ class ExecutiveApiNode(Node):
         self._run_plan()
 
     # ------------------------------------------------------------------
-    # Core: build snapshot, call the VLM, publish /grid_path + status
+    # Core: build snapshot, call the VLM, publish /grid_path
     # ------------------------------------------------------------------
     def _run_plan(self) -> None:
         if self.current_prompt is None:
             return
 
+        if self.current_task_type is None:
+            # Classification failed (or hasn't happened). No task type → no prompt/map to pick.
+            self.get_logger().error('No task type classified — cannot plan.')
+            return
+
         if not self.api_key:
-            self._publish_status(False, 'API key missing')
+            self.get_logger().error('API key missing — cannot plan.')
             return
 
         # NOTE: single-threaded executor — the VLM call below blocks this node's callbacks
         # (incl. /nav/prompt) until it returns. A timer cannot re-enter while a plan is in
         # flight, so replans never overlap. Acceptable for this use.
         try:
-            map_b64 = self._generate_map()
+            # Run CLIPSeg once per replan tick: stores node.pix_labels and writes _OCC_FILE so
+            # translate.py can read the occupancy without running its own CLIPSeg instance.
+            run_segmentation(self)
+
+            # Resolve prompt + map from the classifier's task type. Both are scaffolding for now:
+            # an empty per-task prompt falls back to EXECUTIVE_SYSTEM_PROMPT, and every map builder
+            # currently returns the Battleship grid — so behavior is unchanged until they're filled.
+            system_prompt = PROMPT_BUILDERS[self.current_task_type]()
+            map_b64 = MAP_BUILDERS[self.current_task_type](self)
 
             response = self.client.responses.create(
                 model=self.model,
                 temperature=self.temperature,
-                instructions=EXECUTIVE_SYSTEM_PROMPT,
-                # --- Switched to the in-repo prompt (node_Executive_API/prompt.py). ---
-                # PREVIOUSLY ACTIVE server-stored prompt (uncomment to restore exactly):
-                # prompt={"id": "pmpt_685963df1d0081958a7bbfdd74bdae590a18ad364ec2d535", "version": "5"},
-                # Other (already-inactive) stored-prompt alternates that were here before:
-                # prompt={"id": "pmpt_68d6bfb538708195a919d8d93d58e9b20c3d5460618192f7", "version": "11"},
-                # prompt={"id": "pmpt_6a0261312ee881939341b343263b23280651a298466c79a0", "version": "4"},
+                instructions=system_prompt,
                 input=[
                     {
                         "role": "user",
@@ -198,7 +215,6 @@ class ExecutiveApiNode(Node):
             if result is None:
                 self.get_logger().error(
                     f'Malformed JSON from model - cannot parse. Raw reply: {reply_json!r}')
-                self._publish_status(False, 'malformed JSON from model')
                 return
 
             # Validate + publish paths — must be a dict of {robot_name: [grid labels]} (the
@@ -209,13 +225,11 @@ class ExecutiveApiNode(Node):
                 self.get_logger().error(
                     f"Model 'paths' is not an object (got {type(paths).__name__}: {paths!r}); "
                     "not publishing.")
-                self._publish_status(False, 'planner returned a non-object paths')
                 return
             bad = [n for n, p in paths.items() if not isinstance(p, list)]
             if bad:
                 self.get_logger().error(
                     f"Model 'paths' has non-list routes for {bad}; not publishing.")
-                self._publish_status(False, 'planner returned a non-list route')
                 return
             missing = [n for n in self.robot_names if n not in paths]
             if missing:
@@ -227,13 +241,12 @@ class ExecutiveApiNode(Node):
 
             # Log through ROS logger (INFO)
             self.get_logger().info(f"[exec] Planned paths: {path_msg.data}")
-
-            # Inform triage of success with analysis
-            self._publish_status(True, result.get('analysis', ''))
+            analysis = result.get('analysis', '')
+            if analysis:
+                self.get_logger().info(f"[exec] analysis: {analysis}")
 
         except Exception as exc:
             self.get_logger().error(f'Path‑planning failed: {exc}')
-            self._publish_status(False, str(exc))
 
     # ------------------------------------------------------------------
     # Camera callbacks
@@ -246,34 +259,33 @@ class ExecutiveApiNode(Node):
         self.dist_coeffs = np.array(msg.d, dtype=np.float64)
 
     # ------------------------------------------------------------------
-    # Helper: generate grid-overlay map as base64 PNG (in memory)
+    # Helper: classify the instruction into a task type (first, text-only LLM call)
     # ------------------------------------------------------------------
-    def _generate_map(self) -> str:
-        if self.camera_image is None:
-            raise RuntimeError("No camera image received yet — is the camera publishing?")
-        cv_img = self.bridge.imgmsg_to_cv2(self.camera_image, desired_encoding='rgba8')
-        if self.camera_matrix is not None and self.dist_coeffs is not None:
-            cv_img = cv2.undistort(cv_img, self.camera_matrix, self.dist_coeffs)
-        pil_img = PILImage.fromarray(cv_img).convert("RGBA")
-        grid_resized = self.grid_img.resize(pil_img.size)
-        combined = PILImage.alpha_composite(pil_img, grid_resized)
-        buf = io.BytesIO()
-        combined.save(buf, format='PNG')
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    def _classify_task(self, instruction: str) -> str | None:
+        """Return one of PROMPT_BUILDERS' keys, or None if the classifier can't produce a valid one.
 
-    # ------------------------------------------------------------------
-    # Helper: publish status
-    # ------------------------------------------------------------------
-    def _publish_status(self, success: bool, detail: str | None = None) -> None:
-        status_obj = {'source': 'exec', 'success': success}
-        if success:
-            status_obj['analysis'] = detail or ''
-        else:
-            status_obj['reason'] = detail or 'unknown error'
-
-        status_msg = String()
-        status_msg.data = json.dumps(status_obj)
-        self.status_pub.publish(status_msg)
+        A None result means "don't plan this prompt" — there is no default task type to fall back on.
+        """
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                temperature=self.temperature,
+                instructions=CLASSIFIER_SYSTEM_PROMPT,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": instruction}],
+                    }
+                ],
+            )
+            result = self._parse_json_reply(response.output_text.strip())
+            task_type = (result or {}).get('task_type')
+            if task_type in PROMPT_BUILDERS:
+                return task_type
+            self.get_logger().warn(f"Classifier returned unknown task_type {task_type!r}.")
+        except Exception as exc:
+            self.get_logger().warn(f"Classifier call failed ({exc}).")
+        return None
 
     # ------------------------------------------------------------------
     # Helper: parse the model reply as JSON, tolerating fences / extra prose
@@ -326,7 +338,6 @@ def main(args: list[str] | None = None) -> None:  # pragma: no cover
         node.destroy_node()
         if not already_init:
             rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

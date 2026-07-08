@@ -1,7 +1,6 @@
 import os
 from launch import LaunchDescription
 from launch.actions import GroupAction, DeclareLaunchArgument
-from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -51,23 +50,10 @@ def generate_launch_description():
                 {'replan_period': ParameterValue(
                     LaunchConfiguration('replan_period'), value_type=float)},
                 {'camera_info_topic': '/ueye/test/camera_info'},
+                {'camera': 'lab_test'},
             ],
             remappings=[
                 ('/camera_image', '/ueye/test/image_raw'),
-            ],
-        ),
-    ])
-
-    # Triage API node, OpenAI interactions
-    triage_api_node = GroupAction([
-        Node(
-            package='talking-turtle',
-            executable='node_Triage_API',
-            name='node_Triage_API',
-            output='screen',
-            emulate_tty=True,
-            parameters=[
-                {'openai_api_key': api_key},
             ],
         ),
     ])
@@ -126,38 +112,8 @@ def generate_launch_description():
         ]
     )
 
-    # Audio nodes (TTS output + STT input) — only launched when use_audio:=true.
-    # They require the `sounddevice` package; off by default so the stack runs quietly.
-    use_audio = IfCondition(LaunchConfiguration('use_audio'))
-
-    speech_gen_node = GroupAction([
-        Node(
-            package='talking-turtle',
-            executable='node_Speech_Gen',
-            name='node_Speech_Gen',
-            output='screen',
-            emulate_tty=True,
-            parameters=[
-                {'openai_api_key': api_key},
-            ],
-        ),
-    ], condition=use_audio)
-
-    listener_node = GroupAction([
-        Node(
-            package='talking-turtle',
-            executable='node_Listener',
-            name='node_Listener',
-            output='screen',
-            emulate_tty=True,
-            parameters=[
-                {'openai_api_key': api_key},
-            ],
-        ),
-    ], condition=use_audio)
-
-    # joy_node disabled for now — only the audio push-to-talk node (node_Listener, use_audio)
-    # consumes /joy, and the unconditional joy_node was leaking orphaned processes.
+    # joy_node disabled for now — only the (now-removed) audio push-to-talk node consumed /joy,
+    # and the unconditional joy_node was leaking orphaned processes.
     # joy_node = Node(
     #     package='joy',
     #     executable='joy_node',
@@ -201,10 +157,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'use_audio', default_value='false',
-            description='Launch the audio nodes (node_Speech_Gen TTS + node_Listener STT). '
-                        'Requires the sounddevice package; default false.'),
-        DeclareLaunchArgument(
             'replan_mode', default_value='static',
             description='Executive replanning strategy: "static" (plan once per prompt) or '
                         '"dynamic" (re-plan the same prompt every replan_period seconds).'),
@@ -212,12 +164,9 @@ def generate_launch_description():
             'replan_period', default_value='15.0',
             description='Seconds between dynamic replans (used only when replan_mode:=dynamic).'),
         exec_api_node,
-        triage_api_node,
         control_node,
         control_node_2,
         path_translator_node,
-        speech_gen_node,
-        listener_node,
         # joy_node,   # disabled — see commented joy_node definition above
         path_visualizer_node,
         # logger_node,

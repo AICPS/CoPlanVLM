@@ -33,23 +33,14 @@ CAMERAS = {
 }
 
 
-_active_camera = "gazebo"
-
-
-def set_active_camera(name):
-    """Select which camera calibration pixel<->world uses by default (call once at node init)."""
-    global _active_camera
-    if name not in CAMERAS:
-        raise ValueError(f"unknown camera {name!r}; expected one of {sorted(CAMERAS)}")
-    _active_camera = name
-
-
-def get_active_camera():
-    return _active_camera
-
-
 def _cam(camera):
-    return CAMERAS[camera if camera is not None else _active_camera]
+    if camera is None:
+        raise ValueError(
+            "camera must be specified explicitly — pass camera='gazebo' or 'lab_test'. "
+            "The global set_active_camera mechanism has been removed.")
+    if camera not in CAMERAS:
+        raise ValueError(f"unknown camera {camera!r}; expected one of {sorted(CAMERAS)}")
+    return CAMERAS[camera]
 
 
 # ── Frame offsets (placeholders; tune once real geometry is known) ───────────────────────

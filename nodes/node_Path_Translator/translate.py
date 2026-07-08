@@ -34,10 +34,13 @@ from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
-from coord_transform import ned_to_world, set_active_camera
+from coord_transform import ned_to_world
 from obs_seg import FREE, OCCUPIED, UNKNOWN
-from obs_seg.segmenter import TraversabilitySegmenter
 from obs_seg.occupancy import mask_to_occupancy
+
+_OCC_FILE = os.path.normpath(os.path.join(
+    get_package_share_directory('talking-turtle'), '..', '..', '..', '..',
+    'debug', 'talking_turtle_pix_labels.npy'))
 
 from . import astar_proj, chomp_proj
 from .chomp_proj import PARAMS as CHOMP_PARAMS
@@ -65,13 +68,9 @@ class SimplePathTranslator(Node):
         # Which overhead camera calibration to use for pixel<->world (grid labels, occupancy):
         # "gazebo" (sim) or "lab_test" (hardware). Set by the launch file. Poses arrive in NED.
         self.declare_parameter("camera", "gazebo")
-        set_active_camera(self.get_parameter("camera").get_parameter_value().string_value)
 
         # ─── Obstacle-aware planning params ───────────────────────────────────
         self.declare_parameter("image_topic", "/ids_overhead/image")
-        self.declare_parameter("traversable_prompts", ["the floor"])
-        self.declare_parameter("untraversable_prompts", [""])   # "" entries filtered out
-        self.declare_parameter("threshold", 0.48)
         self.declare_parameter("resolution", 0.05)              # m / occupancy cell
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
@@ -89,10 +88,8 @@ class SimplePathTranslator(Node):
         path_topic     = self.get_parameter("path_topic").get_parameter_value().string_value
         self.robot_names = list(self.get_parameter("robot_names").value)
 
+        self.camera_name: str = self.get_parameter("camera").get_parameter_value().string_value
         self.image_topic = self.get_parameter("image_topic").value
-        self.traversable_prompts = list(self.get_parameter("traversable_prompts").value)
-        self.untraversable_prompts = [p for p in self.get_parameter("untraversable_prompts").value if p]
-        self.threshold = self.get_parameter("threshold").value
         self.resolution = self.get_parameter("resolution").value
 
         self.save_debug = self.get_parameter("save_debug").value
@@ -127,11 +124,9 @@ class SimplePathTranslator(Node):
         # lives in coord_transform).
         self.grid_px: Dict[str, np.ndarray] = self._load_grid_csv(grid_csv)
 
-        # ─── Segmentation + overhead image ────────────────────────────────────
+        # ─── Overhead image (still subscribed for debug saves) ─────────────────
         self.bridge = CvBridge()
         self.latest_rgb = None
-        self.get_logger().info("Loading CLIPSeg segmenter (one-time)…")
-        self.segmenter = TraversabilitySegmenter()
 
         # ─── ROS 2 I/O ────────────────────────────────────────────────────────
         self.create_subscription(Image, self.image_topic, self._on_image, 1)
@@ -204,7 +199,7 @@ class SimplePathTranslator(Node):
         if cur_xy is None:
             self.get_logger().warn(
                 f"[{name}] No current pose yet; route will start at the first label.")
-        ref, unknown = astar_proj.build_reference(labels, cur_xy, self.grid_px)
+        ref, unknown = astar_proj.build_reference(labels, cur_xy, self.grid_px, camera=self.camera_name)
         for lbl in unknown:
             self.get_logger().warn(f"[{name}] Unknown label '{lbl}' – skipping.")
         return ref, cur_xy
@@ -239,12 +234,15 @@ class SimplePathTranslator(Node):
             self.get_logger().warn("No overhead image received yet — cannot plan. Skipping.")
             return
 
-        # Build the occupancy grid once from the latest frame, then the planner's costmap (infl
-        # for A*, SDF for CHOMP) once; both are reused across the robots in this message.
-        pix_labels, _ = self.segmenter.classify(
-            self.latest_rgb, self.traversable_prompts,
-            self.untraversable_prompts, self.threshold)
-        grid, meta = mask_to_occupancy(pix_labels, self.resolution)
+        # Build the occupancy grid from the pix_labels written by the exec node's CLIPSeg run.
+        # CLIPSeg lives in exec (map_gen.run_segmentation); translate reads the shared file so
+        # the model only loads once across the two nodes.
+        if not os.path.exists(_OCC_FILE):
+            self.get_logger().warn(
+                "Occupancy file not found — has exec published a plan yet? Skipping.")
+            return
+        pix_labels = np.load(_OCC_FILE)
+        grid, meta = mask_to_occupancy(pix_labels, self.resolution, camera=self.camera_name)
         ctx = self.planner.build(grid, meta, self.plan_params)
 
         for name, labels in plans.items():
@@ -281,7 +279,7 @@ class SimplePathTranslator(Node):
                     base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
                     self._save_common_debug(out_dir, base, pix_labels, grid)
                     dbg["start_world"] = cur_xy
-                    self.planner.save_debug(out_dir, base, grid, meta, ctx, dbg, self.plan_params)
+                    self.planner.save_debug(out_dir, base, grid, meta, ctx, dbg, self.plan_params, camera=self.camera_name)
                 except Exception as exc:  # noqa: BLE001
                     self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 

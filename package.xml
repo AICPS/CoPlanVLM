@@ -3,8 +3,8 @@
 <package format="3">
   <name>talking-turtle</name>
   <version>0.0.0</version>
-  <description>2-node TurtleBot control w/ OpenAI API</description>
-  <maintainer email="c27caleb.craddock@afacademy.af.edu">ccraddock</maintainer>
+  <description>TurtleBot control w/ OpenAI API (adaptive Executive path planner)</description>
+  <maintainer email="davidrm3@uci.edu">David</maintainer>
   <license>Apache-2.0</license>
 
   <exec_depend>rclpy</exec_depend>

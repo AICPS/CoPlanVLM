@@ -1,10 +1,18 @@
-"""In-repo system prompt for the Executive (path-planner) node (replaces the server-stored
+"""In-repo system prompts for the Executive (path-planner) node (replaces the server-stored
 pmpt_ prompt).
 
 Reconstructed from the node's contract (see exec.py): given an instruction plus an overhead
 grid image, the model must return JSON containing a per-robot map of grid-cell-label routes
 (`paths`) — one entry for EACH robot — plus a short `analysis`. Kept in the repo so the stack
 runs on any OpenAI key and the output contract lives next to the code that parses/publishes it.
+
+Adaptive-planner scaffolding
+----------------------------
+A first LLM call (the classifier, driven by CLASSIFIER_SYSTEM_PROMPT) tags each instruction with a
+task type — "nav2point", "manouver", or "coverage" — and the Executive then picks the matching
+prompt via PROMPT_BUILDERS[task_type](). The three per-task builders are intentionally EMPTY stubs
+for now (they return ""); exec falls back to EXECUTIVE_SYSTEM_PROMPT whenever a builder is empty, so
+the pipeline keeps working unchanged until the real per-task prompts are written.
 """
 
 EXECUTIVE_SYSTEM_PROMPT = """\
@@ -48,4 +56,53 @@ Rules:
 - If a robot's goal is unreachable or it has no task, return an empty list (or its current
   cell only) for that robot and explain briefly in "analysis".
 - Return valid JSON only — no comments, no trailing text.
+"""
+
+
+# ----------------------------------------------------------------------
+# Per-task prompt builders (SCAFFOLDING — empty for now, fill in later).
+# Each returns the system prompt for its task type. Returning "" signals
+# "not written yet"; exec falls back to EXECUTIVE_SYSTEM_PROMPT in that case.
+# ----------------------------------------------------------------------
+
+def gen_nav2point_prompt() -> str:
+    """System prompt for navigating each robot to a single goal point. TODO: fill in."""
+    return ""
+
+
+def gen_manouver_prompt() -> str:
+    """System prompt for a multi-waypoint maneuver (pass through ordered points). TODO: fill in."""
+    return ""
+
+
+def gen_coverage_prompt() -> str:
+    """System prompt for sweeping/covering an area. TODO: fill in."""
+    return ""
+
+
+# Dispatch registry: task type -> prompt builder. The keys are the ONLY valid task types; the
+# classifier's output is validated against them and _run_plan() looks the builder up here. There is
+# no default: the classifier must return one of these each time, and a plan is skipped if it can't.
+PROMPT_BUILDERS = {
+    "nav2point": gen_nav2point_prompt,
+    "manouver": gen_manouver_prompt,
+    "coverage": gen_coverage_prompt,
+}
+
+
+# System prompt for the first (classifier) LLM call. Text-only: it reads the operator instruction
+# and returns which planner behavior best fits, as strict JSON. Kept minimal by design.
+CLASSIFIER_SYSTEM_PROMPT = """\
+You route a robot navigation instruction to the planner best suited to carry it out. Read the
+instruction and choose exactly one task type:
+
+- "nav2point": drive to a single location / goal point (e.g. "go to the door", "meet me at the
+  desk").
+- "manouver": pass through several ordered waypoints or follow a route (e.g. "patrol past the
+  window, the desk, then the door", "go to A then B then C").
+- "coverage": sweep or cover a whole area, visiting all of a region (e.g. "search the room",
+  "sweep the open floor", "cover the left half").
+
+Respond with EXACTLY one JSON object and nothing else:
+{"task_type": "nav2point" | "manouver" | "coverage"}
 """

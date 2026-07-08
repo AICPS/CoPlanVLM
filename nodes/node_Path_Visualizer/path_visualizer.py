@@ -24,7 +24,7 @@ from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
 from coord_transform import (world_to_pixel, world_to_pixel_pose, ned_to_world,
-                             ned_to_world_pose, yaw_from_quaternion, set_active_camera)
+                             ned_to_world_pose, yaw_from_quaternion)
 
 
 class PathVisualizer(Node):
@@ -34,6 +34,7 @@ class PathVisualizer(Node):
         super().__init__("path_visualizer")
 
         self._declare_parameters()
+        self.camera_name: str = self.get_parameter("camera").get_parameter_value().string_value
 
         self.grid_csv = self.get_parameter("grid_csv").value
         self.label_column = self.get_parameter("label_column").value
@@ -131,7 +132,6 @@ class PathVisualizer(Node):
         # Which overhead camera calibration to use for world<->pixel: "gazebo" (sim) or
         # "lab_test" (hardware). Set by the launch file. Poses always arrive in NED.
         self.declare_parameter("camera", "gazebo")
-        set_active_camera(self.get_parameter("camera").get_parameter_value().string_value)
 
         self.declare_parameter("save_overlays", True)
         self.declare_parameter("window_name", "Path Tracking")
@@ -265,7 +265,7 @@ class PathVisualizer(Node):
 
     def _world_to_pixel(self, x_world: float, y_world: float) -> Tuple[int, int]:
         # Calibration owned by coord_transform; this wrapper just rounds to int pixels for cv2.
-        u, v = world_to_pixel(x_world, y_world)
+        u, v = world_to_pixel(x_world, y_world, camera=self.camera_name)
         return int(round(u)), int(round(v))
 
 
@@ -418,7 +418,7 @@ class PathVisualizer(Node):
                 # NED pose -> world -> pixel, all through the shared pose transforms so the arrow
                 # can never disagree with the dot (each conversion carries the yaw consistently).
                 wx, wy, wyaw = ned_to_world_pose(pose.position.x, pose.position.y, ned_yaw)
-                pu, pv, pixel_yaw = world_to_pixel_pose(wx, wy, wyaw)
+                pu, pv, pixel_yaw = world_to_pixel_pose(wx, wy, wyaw, camera=self.camera_name)
                 robot_u, robot_v = int(round(pu)), int(round(pv))
                 arrow_len = 30
                 tip = (

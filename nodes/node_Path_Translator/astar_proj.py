@@ -34,7 +34,7 @@ def _p(params, key):
     return PARAMS[key] if v is None else v
 
 
-def build_reference(labels, pose_xy, grid_px):
+def build_reference(labels, pose_xy, grid_px, camera=None):
     """Convert a label list to a world-frame reference route.
 
     Shared between translate.py and test_pipeline.py — the single implementation of
@@ -44,6 +44,7 @@ def build_reference(labels, pose_xy, grid_px):
         labels:   ordered list of grid-cell label strings from the VLM
         pose_xy:  robot world position (x, y) prepended as the first point, or None
         grid_px:  {label: indexable[0]=u, [1]=v} — accepts (u,v) tuples or np.array([u,v,1])
+        camera:   camera calibration key (e.g. "gazebo", "lab_test") — required
 
     On a replan the robot has usually driven past its first few centroids, so any centroid before
     the one nearest the current pose is dropped — this prevents the new route from backtracking.
@@ -62,7 +63,7 @@ def build_reference(labels, pose_xy, grid_px):
             unknown.append(label)
             continue
         u, v = float(grid_px[label][0]), float(grid_px[label][1])
-        x, y = pixel_to_world(u, v)
+        x, y = pixel_to_world(u, v, camera=camera)
         centroids.append((float(x), float(y)))
 
     # Drop centroids before the one nearest the current pose (skip already-passed waypoints).
@@ -137,7 +138,7 @@ def _i(uv):
     return (int(round(uv[0])), int(round(uv[1])))
 
 
-def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params):
+def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=None):
     """Route-specific debug: route_centroids, route_planned, occ_inflated, inflation_overlay."""
     infl = ctx["infl"]
     base = base_bgr
@@ -148,7 +149,7 @@ def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params):
 
     # Naive route through the reference centroids (orange line, blue dots).
     rc = base.copy()
-    ref_px = [_i(world_to_pixel(x, y)) for (x, y) in ref]
+    ref_px = [_i(world_to_pixel(x, y, camera=camera)) for (x, y) in ref]
     for a, b in zip(ref_px, ref_px[1:]):
         cv2.line(rc, a, b, (0, 165, 255), 2)
     for p in ref_px:
@@ -157,7 +158,7 @@ def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params):
 
     # Obstacle-avoiding planned route (green line; red=anchor, yellow=intermediate; magenta=start).
     rp = base.copy()
-    ppx = [_i(world_to_pixel(*cell_to_world(gx, gy, meta))) for (gx, gy) in full_cells]
+    ppx = [_i(world_to_pixel(*cell_to_world(gx, gy, meta), camera=camera)) for (gx, gy) in full_cells]
     for a, b in zip(ppx, ppx[1:]):
         cv2.line(rp, a, b, (0, 200, 0), 2)
     anchor_set = {(int(a[0]), int(a[1])) for a in anchors}
@@ -165,7 +166,7 @@ def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params):
         color = (0, 0, 255) if (int(cell[0]), int(cell[1])) in anchor_set else (0, 255, 255)
         cv2.circle(rp, p, 5, color, -1)
     if start_world is not None:
-        cv2.circle(rp, _i(world_to_pixel(start_world[0], start_world[1])), 6, (255, 0, 255), -1)
+        cv2.circle(rp, _i(world_to_pixel(start_world[0], start_world[1], camera=camera)), 6, (255, 0, 255), -1)
     cv2.imwrite(os.path.join(out_dir, "route_planned.png"), rp)
 
     # Inflated occupancy map (white=free, black=occupied, gray=unknown), reoriented to match image.
@@ -180,7 +181,7 @@ def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params):
     # Inflation margin overlay (pixel space): cyan=inflation margin, blue=true obstacle.
     h_img, w_img = base.shape[:2]
     uu, vv = np.meshgrid(np.arange(w_img), np.arange(h_img))
-    xs, ys = pixel_to_world(uu, vv)
+    xs, ys = pixel_to_world(uu, vv, camera=camera)
     gx = np.floor((xs - meta["origin_x"]) / meta["resolution"]).astype(np.int64)
     gy = np.floor((ys - meta["origin_y"]) / meta["resolution"]).astype(np.int64)
     inb = (gx >= 0) & (gx < meta["width"]) & (gy >= 0) & (gy < meta["height"])
