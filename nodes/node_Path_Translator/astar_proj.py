@@ -4,10 +4,13 @@ Method: project each reference point (robot pose + VLM centroids) onto the neare
 the INFLATED occupancy grid, then pairwise A* between consecutive anchors with line-of-sight
 thinning. Reuses grid_planner + obs_seg.occupancy verbatim.
 
-Pluggable planner interface (shared with chomp_proj):
-    build(grid, meta, params) -> ctx
+Pluggable planner interface (shared with coverage_proj):
+    build_reference(labels, pose_xy, grid_px, camera) -> (ref, unknown)
     plan(reference_xy, ctx, meta, params) -> (world_path, debug)
     save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params) -> None
+
+The planning grid is inflated upstream (exec.run_segmentation / test_pipeline), so ctx is simply
+{"infl": <inflated grid>} built by the caller — this module never inflates.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ import numpy as np
 
 from coord_transform import pixel_to_world, world_to_pixel
 from obs_seg import FREE, OCCUPIED
-from obs_seg.occupancy import inflate_occupancy, world_to_cell, cell_to_world
+from obs_seg.occupancy import world_to_cell, cell_to_world
 from grid_planner import project_to_free, astar, simplify_path_los
 
 
@@ -78,12 +81,6 @@ def build_reference(labels, pose_xy, grid_px, camera=None):
         ref.append((float(pose_xy[0]), float(pose_xy[1])))
     ref.extend(centroids)
     return ref, unknown
-
-
-def build(grid, meta, params):
-    """Inflate the occupancy grid once per /grid_path message; reused for every robot."""
-    infl = inflate_occupancy(grid, meta["resolution"], params.get("inflation_radius", 0.5))
-    return {"infl": infl}
 
 
 def plan(reference_xy, ctx, meta, params):

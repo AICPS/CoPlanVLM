@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-simple_path_translator.py — ROS 2 entry point for grid-label -> metric path planning.
+simple_path_translator.py — ROS 2 entry point for label -> metric path planning.
 
-Subscribes to `/grid_path` (a JSON object {robot_name: [grid labels]}), builds an occupancy grid
-once per message from the latest overhead frame, turns each robot's labels into a world-frame
-reference route (robot pose prepended), and DELEGATES the actual path computation to a selectable
+Subscribes to `/vlm_plan`, a JSON wrapper naming the planner and the per-robot label lists:
+
+    {"planner": "astar" | "coverage", "routes": {robot_name: [labels]}}
+
+(A bare {robot_name: [labels]} object is also accepted and defaults to the astar planner.) The node
+reads the pre-inflated occupancy snapshot exec wrote to _OCC_FILE, turns each robot's labels into a
+world-frame reference route (robot pose prepended), and DELEGATES the path computation to the named
 planner module:
 
-    planner:=chomp  (default) -> chomp_proj : CHOMP trajectory optimization over an SDF
-    planner:=astar            -> astar_proj : project-to-free + pairwise A* + LOS thinning
+    astar    -> astar_proj    : project-to-free + pairwise A* + LOS thinning (ordered waypoints)
+    coverage -> coverage_proj : project-to-free + open-TSP ordering + A* stitching (region sweep)
 
-Each planner exposes build(grid, meta, params) / plan(reference_xy, ctx, meta, params) /
-save_debug(...). This node keeps everything ROS-specific (I/O, pose caching, the shared
-occupancy/segmentation debug images) and stays thin; the algorithms live in the planner modules.
-Each robot's result is published as a Float32MultiArray [x1,y1,x2,y2,...] on /<robot>/waypoint_path.
+Each planner exposes build_reference(...) / plan(reference_xy, ctx, meta, params) / save_debug(...).
+Inflation is done once upstream (exec.run_segmentation), so this node never inflates — it just wraps
+the inflated grid as ctx = {"infl": infl}. This node keeps everything ROS-specific (I/O, pose
+caching, the shared occupancy/segmentation debug images) and stays thin; the algorithms live in the
+planner modules. Each robot's result is published as a Float32MultiArray [x1,y1,x2,y2,...] on
+/<robot>/waypoint_path.
 """
 from __future__ import annotations
 
@@ -36,17 +42,18 @@ from ament_index_python.packages import get_package_share_directory
 
 from coord_transform import ned_to_world
 from obs_seg import FREE, OCCUPIED, UNKNOWN
-from obs_seg.occupancy import mask_to_occupancy
 
+# Occupancy snapshot written by exec (map_gen.run_segmentation): pre-inflated planning grid plus the
+# raw grid / pixel labels / meta for debug. Read here instead of rebuilding or re-inflating.
 _OCC_FILE = os.path.normpath(os.path.join(
     get_package_share_directory('talking-turtle'), '..', '..', '..', '..',
-    'debug', 'talking_turtle_pix_labels.npy'))
+    'debug', 'talking_turtle_occupancy.npz'))
 
-from . import astar_proj, chomp_proj
-from .chomp_proj import PARAMS as CHOMP_PARAMS
+from . import astar_proj, coverage_proj
 from .astar_proj import PARAMS as ASTAR_PARAMS
+from .coverage_proj import PARAMS as COVERAGE_PARAMS
 
-_PLANNERS = {"astar": astar_proj, "chomp": chomp_proj}
+_PLANNERS = {"astar": astar_proj, "coverage": coverage_proj}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -61,7 +68,7 @@ class SimplePathTranslator(Node):
         self.declare_parameter("label_column", "cell")
         self.declare_parameter("u_column", "center_x")
         self.declare_parameter("v_column", "center_y")
-        self.declare_parameter("path_topic", "/grid_path")
+        self.declare_parameter("vlm_plan_topic", "/vlm_plan")
         # One robot per entry; each robot's plan is published to /<name>/waypoint_path.
         self.declare_parameter("robot_names", ["raph", "donnie"])
 
@@ -75,9 +82,9 @@ class SimplePathTranslator(Node):
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
 
-        # ─── Planner selection + CHOMP/A* knobs ──────────────────────────────
-        self.declare_parameter("planner", "astar")               # "chomp" | "astar"
-        for k, v in {**CHOMP_PARAMS, **ASTAR_PARAMS}.items():
+        # ─── Planner knobs (astar + coverage) ────────────────────────────────
+        # The planner is chosen per message (from the /vlm_plan "planner" field), not by a param.
+        for k, v in {**ASTAR_PARAMS, **COVERAGE_PARAMS}.items():
             self.declare_parameter(k, v)
 
         # ─── Read parameters once ─────────────────────────────────────────────
@@ -85,7 +92,7 @@ class SimplePathTranslator(Node):
         self.lbl_col   = self.get_parameter("label_column").get_parameter_value().string_value
         self.u_col     = self.get_parameter("u_column").get_parameter_value().string_value
         self.v_col     = self.get_parameter("v_column").get_parameter_value().string_value
-        path_topic     = self.get_parameter("path_topic").get_parameter_value().string_value
+        vlm_plan_topic = self.get_parameter("vlm_plan_topic").get_parameter_value().string_value
         self.robot_names = list(self.get_parameter("robot_names").value)
 
         self.camera_name: str = self.get_parameter("camera").get_parameter_value().string_value
@@ -95,15 +102,9 @@ class SimplePathTranslator(Node):
         self.save_debug = self.get_parameter("save_debug").value
         self.debug_dir = self.get_parameter("debug_dir").value
 
-        # Pick the planner module (default chomp). All tunables are gathered into one dict that
-        # is passed to the planner's build/plan/save_debug.
-        self.planner_name = self.get_parameter("planner").value
-        self.planner = _PLANNERS.get(self.planner_name)
-        if self.planner is None:
-            self.get_logger().warn(f"Unknown planner '{self.planner_name}'; defaulting to chomp.")
-            self.planner_name, self.planner = "chomp", chomp_proj
-        self.plan_params = {k: self.get_parameter(k).value for k in {**CHOMP_PARAMS, **ASTAR_PARAMS}}
-        self.get_logger().info(f"Planner: {self.planner_name}")
+        # All planner tunables gathered into one dict, passed to the per-message planner's
+        # plan()/save_debug(). The planner module itself is selected per message in _on_path_msg.
+        self.plan_params = {k: self.get_parameter(k).value for k in {**ASTAR_PARAMS, **COVERAGE_PARAMS}}
 
         # ─── Debug grid overlay (shared) ──────────────────────────────────────
         self._grid_overlay = None
@@ -130,7 +131,7 @@ class SimplePathTranslator(Node):
 
         # ─── ROS 2 I/O ────────────────────────────────────────────────────────
         self.create_subscription(Image, self.image_topic, self._on_image, 1)
-        self.sub = self.create_subscription(String, path_topic, self._on_path_msg, 10)
+        self.sub = self.create_subscription(String, vlm_plan_topic, self._on_path_msg, 10)
         self.world_pubs: Dict[str, object] = {
             name: self.create_publisher(Float32MultiArray, f"/{name}/waypoint_path", 10)
             for name in self.robot_names
@@ -189,17 +190,17 @@ class SimplePathTranslator(Node):
         return centres
 
     # ------------------------------------------------------------------
-    def _build_reference(self, name, labels):
+    def _build_reference(self, name, labels, planner):
         """Robot pose (if known) + label centroids -> world reference route. Returns (ref, cur_xy).
 
-        Delegates label->world conversion to astar_proj.build_reference — the single shared
-        implementation used by both this node and test_pipeline.py.
+        Delegates label->world conversion to the chosen planner's build_reference (astar trims
+        already-passed centroids; coverage keeps all, since the TSP reorders them).
         """
         cur_xy = self.robot_xy.get(name)
         if cur_xy is None:
             self.get_logger().warn(
                 f"[{name}] No current pose yet; route will start at the first label.")
-        ref, unknown = astar_proj.build_reference(labels, cur_xy, self.grid_px, camera=self.camera_name)
+        ref, unknown = planner.build_reference(labels, cur_xy, self.grid_px, camera=self.camera_name)
         for lbl in unknown:
             self.get_logger().warn(f"[{name}] Unknown label '{lbl}' – skipping.")
         return ref, cur_xy
@@ -221,29 +222,47 @@ class SimplePathTranslator(Node):
     #  Subscription callback
     # ──────────────────────────────────────────────────────────────────
     def _on_path_msg(self, msg: String) -> None:
-        """Plan a path for each robot named in the /grid_path message via the selected planner."""
+        """Plan a path for each robot in the /vlm_plan message via the message-selected planner."""
         try:
-            plans = json.loads(msg.data)
-            assert isinstance(plans, dict)
+            data = json.loads(msg.data)
+            assert isinstance(data, dict)
         except Exception as e:
             self.get_logger().error(
-                f"Bad /grid_path message (expect JSON object {{robot: [labels]}}): {e}")
+                f"Bad /vlm_plan message (expect {{planner, routes}} or {{robot: [labels]}}): {e}")
+            return
+
+        # Unwrap the {planner, routes} wrapper; a bare {robot: [labels]} object defaults to astar.
+        if "routes" in data:
+            planner_name = data.get("planner", "astar")
+            plans = data.get("routes", {})
+        else:
+            planner_name, plans = "astar", data
+        if not isinstance(plans, dict):
+            self.get_logger().error(f"/vlm_plan 'routes' is not an object; got {plans!r}.")
+            return
+        planner = _PLANNERS.get(planner_name)
+        if planner is None:
+            self.get_logger().warn(
+                f"Unknown planner '{planner_name}' in /vlm_plan; skipping.")
             return
 
         if self.latest_rgb is None:
             self.get_logger().warn("No overhead image received yet — cannot plan. Skipping.")
             return
 
-        # Build the occupancy grid from the pix_labels written by the exec node's CLIPSeg run.
-        # CLIPSeg lives in exec (map_gen.run_segmentation); translate reads the shared file so
-        # the model only loads once across the two nodes.
+        # Read the pre-inflated occupancy snapshot written by exec (map_gen.run_segmentation). exec
+        # runs CLIPSeg and inflates once; translate consumes the shared file so neither step repeats.
         if not os.path.exists(_OCC_FILE):
             self.get_logger().warn(
                 "Occupancy file not found — has exec published a plan yet? Skipping.")
             return
-        pix_labels = np.load(_OCC_FILE)
-        grid, meta = mask_to_occupancy(pix_labels, self.resolution, camera=self.camera_name)
-        ctx = self.planner.build(grid, meta, self.plan_params)
+        snap = np.load(_OCC_FILE)
+        pix_labels = snap["pix_labels"]
+        grid = snap["grid"]
+        meta = {"resolution": float(snap["resolution"]),
+                "origin_x": float(snap["origin_x"]), "origin_y": float(snap["origin_y"]),
+                "width": int(snap["width"]), "height": int(snap["height"])}
+        ctx = {"infl": snap["infl"]}   # inflated upstream; planners never inflate
 
         for name, labels in plans.items():
             if name not in self.world_pubs:
@@ -254,12 +273,12 @@ class SimplePathTranslator(Node):
                 self.get_logger().warn(f"[{name}] Route is not a list; skipping.")
                 continue
 
-            ref, cur_xy = self._build_reference(name, labels)
+            ref, cur_xy = self._build_reference(name, labels, planner)
             if not ref:
                 self.get_logger().warn(f"[{name}] No valid waypoints in route; nothing to plan.")
                 continue
 
-            world_path, dbg = self.planner.plan(ref, ctx, meta, self.plan_params)
+            world_path, dbg = planner.plan(ref, ctx, meta, self.plan_params)
             for w in dbg.get("warnings", []):
                 self.get_logger().warn(f"[{name}] {w}")
             if not world_path:
@@ -270,7 +289,7 @@ class SimplePathTranslator(Node):
             self.get_logger().info(
                 f"[{name}] Planned path: {len(world_path)} waypoints "
                 f"(grid {meta['width']}x{meta['height']} @ {meta['resolution']} m, "
-                f"planner={self.planner_name}).")
+                f"planner={planner_name}).")
 
             if self.save_debug and self.debug_dir and self.latest_rgb is not None:
                 try:
@@ -279,7 +298,7 @@ class SimplePathTranslator(Node):
                     base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
                     self._save_common_debug(out_dir, base, pix_labels, grid)
                     dbg["start_world"] = cur_xy
-                    self.planner.save_debug(out_dir, base, grid, meta, ctx, dbg, self.plan_params, camera=self.camera_name)
+                    planner.save_debug(out_dir, base, grid, meta, ctx, dbg, self.plan_params, camera=self.camera_name)
                 except Exception as exc:  # noqa: BLE001
                     self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 

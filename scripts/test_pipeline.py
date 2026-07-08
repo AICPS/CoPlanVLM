@@ -18,9 +18,9 @@ Usage (from workspace root):
     python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
         --prompt "Send raph to the chair and donnie to the table"
 
-    # Use A* instead of CHOMP:
+    # Coverage (region sweep) planner instead of A*:
     python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
-        --grid-path '{"raph": ["A1","C3"]}' --planner astar
+        --grid-path '{"raph": ["A1","C3"]}' --planner coverage
 
 Output (written to --out, default debug/offline_test/<robot_name>/):
     raw_overhead.png      — the loaded image
@@ -31,7 +31,6 @@ Output (written to --out, default debug/offline_test/<robot_name>/):
     route_planned.png     — A* obstacle-avoiding path
     occ_inflated.png      — inflated occupancy map
     inflation_overlay.png — inflation margin visualised on overhead image
-    (or sdf.png/chomp_route.png for --planner chomp)
 """
 from __future__ import annotations
 
@@ -50,13 +49,13 @@ import numpy as np
 from coord_transform import pixel_to_world, world_to_pixel, gazebo_to_world
 from obs_seg import FREE, OCCUPIED, UNKNOWN
 from obs_seg.segmenter import TraversabilitySegmenter
-from obs_seg.occupancy import mask_to_occupancy
+from obs_seg.occupancy import mask_to_occupancy, inflate_occupancy
 
-from node_Path_Translator import chomp_proj, astar_proj
-from node_Path_Translator.chomp_proj import PARAMS as CHOMP_PARAMS
+from node_Path_Translator import astar_proj, coverage_proj
 from node_Path_Translator.astar_proj import PARAMS as ASTAR_PARAMS
+from node_Path_Translator.coverage_proj import PARAMS as COVERAGE_PARAMS
 
-_PLANNERS = {"chomp": chomp_proj, "astar": astar_proj}
+_PLANNERS = {"astar": astar_proj, "coverage": coverage_proj}
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PKG_DIR = _SCRIPT_DIR.parent
@@ -247,7 +246,7 @@ def main() -> None:
                         help='JSON string {"robot": ["A1","B2",...]} — skips VLM call')
     parser.add_argument("--prompt", default=None,
                         help="User instruction for GPT-4o (used only if --grid-path not set)")
-    parser.add_argument("--planner", default="astar", choices=["chomp", "astar"],
+    parser.add_argument("--planner", default="astar", choices=["astar", "coverage"],
                         help="Path planner to use (default: astar)")
     parser.add_argument("--out", default="debug/offline_test",
                         help="Debug output directory (default: debug/offline_test)")
@@ -319,11 +318,14 @@ def main() -> None:
         sys.exit(f"Grid CSV not found: {csv_path}")
     grid_px = _load_grid_csv(csv_path)
 
-    # ── Planner context (built once, shared across robots) ────────────────
+    # ── Planner context (inflated once, shared across robots) ─────────────
+    # Inflation lives in obs_seg.occupancy and is applied here (mirrors exec.run_segmentation); the
+    # planner modules consume the pre-inflated grid and never inflate.
     planner = _PLANNERS[args.planner]
-    params = {**CHOMP_PARAMS, **ASTAR_PARAMS}
+    params = {**ASTAR_PARAMS, **COVERAGE_PARAMS}
     print(f"Building {args.planner} planner context…")
-    ctx = planner.build(grid, meta, params)
+    infl = inflate_occupancy(grid, meta["resolution"], 0.5)
+    ctx = {"infl": infl}
 
     # ── Plan per robot ────────────────────────────────────────────────────
     for name, labels in paths.items():
@@ -334,9 +336,10 @@ def main() -> None:
             print(f"[{name}] no pose in poses.json; skipping.", file=sys.stderr)
             continue
 
-        # Build reference route via the shared astar_proj function.
+        # Build reference route via the selected planner (astar trims passed centroids; coverage
+        # keeps all for the TSP to reorder).
         pose_xy = robot_world_xy[name]
-        ref, unknown = astar_proj.build_reference(labels, pose_xy, grid_px)
+        ref, unknown = planner.build_reference(labels, pose_xy, grid_px)
         for lbl in unknown:
             print(f"[{name}] unknown label '{lbl}'; skipping.")
 

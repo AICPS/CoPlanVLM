@@ -12,10 +12,12 @@ calls:
 
 Publishes:
 
-* **`/grid_path`** – the selected route(s) (JSON object of per-robot grid-cell labels).
+* **`/vlm_plan`** – the selected plan: a JSON wrapper
+  ``{"planner": "astar"|"coverage", "routes": {robot_name: [labels]}}`` naming the downstream
+  planner and each robot's label list.
 
-The task type selects both the system prompt (`prompt_gen.PROMPT_BUILDERS`)
-and the map overlay (`map_gen.MAP_BUILDERS`).
+The task type selects the system prompt (`prompt_gen.PROMPT_BUILDERS`), the map overlay
+(`map_gen.MAP_BUILDERS`), and the downstream planner (`_TASK_ROUTING`).
 
 No chat history is stored – each call is stateless.
 """
@@ -29,24 +31,34 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 import rclpy.wait_for_message
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 from openai import OpenAI
 
 from node_Executive_API.prompt_gen import (
-    EXECUTIVE_SYSTEM_PROMPT,
     PROMPT_BUILDERS,
     CLASSIFIER_SYSTEM_PROMPT,
 )
 from node_Executive_API.map_gen import MAP_BUILDERS, run_segmentation
+
+# Task type -> (model output key, downstream planner published on /vlm_plan).
+# nav2point / manouver return ordered "waypoints" routed through A*; coverage returns an unordered
+# "regions" cell set routed through the coverage (TSP) planner.
+_TASK_ROUTING = {
+    "nav2point": ("waypoints", "astar"),
+    "manouver":  ("waypoints", "astar"),
+    "coverage":  ("regions",   "coverage"),
+}
 
 # ----------------------------------------------------------------------
 # Node definition
 # ----------------------------------------------------------------------
 
 class ExecutiveApiNode(Node):
-    """TurtleBot high‑level path planner publishing to /grid_path."""
+    """TurtleBot high‑level path planner publishing to /vlm_plan."""
 
     def __init__(self) -> None:
         super().__init__('executive_api_node')
@@ -55,7 +67,7 @@ class ExecutiveApiNode(Node):
         self.declare_parameter('openai_api_key', '')
         self.declare_parameter('model', 'gpt-4o')                   # vision-capable planner model
         self.declare_parameter('nav_prompt_topic', '/nav/prompt')  # ⇐ input
-        self.declare_parameter('exec_path_topic',  '/grid_path')     # ⇐ output
+        self.declare_parameter('vlm_plan_topic',  '/vlm_plan')       # ⇐ output
         self.declare_parameter('camera_image_topic', '/camera_image')
         self.declare_parameter('camera_info_topic', '/ids_overhead/camera_info')
         self.declare_parameter('robot_names', ['raph', 'donnie'])  # roster the planner must cover
@@ -68,19 +80,23 @@ class ExecutiveApiNode(Node):
         # Camera calibration key and occupancy grid resolution (passed to map builders via self).
         self.declare_parameter('camera', 'gazebo')              # "gazebo" | "lab_test"
         self.declare_parameter('resolution', 0.05)              # m / occupancy cell
+        # Obstacle inflation radius (m) applied once here in run_segmentation; the pre-inflated grid
+        # is shared with translate so the planner modules never inflate. TurtleBot4 radius ~0.17 m.
+        self.declare_parameter('inflation_radius', 0.5)
 
         self.robot_names: list[str] = list(self.get_parameter('robot_names').value)
         self.api_key: str   = self.get_parameter('openai_api_key').value
         self.model: str     = self.get_parameter('model').value
         self.temperature: float = self.get_parameter('temperature').value
         self.nav_prompt_topic: str = self.get_parameter('nav_prompt_topic').value
-        self.exec_path_topic: str   = self.get_parameter('exec_path_topic').value
+        self.vlm_plan_topic: str   = self.get_parameter('vlm_plan_topic').value
         self.camera_image_topic: str = self.get_parameter('camera_image_topic').value
         self.camera_info_topic: str = self.get_parameter('camera_info_topic').value
         self.replan_mode: str = self.get_parameter('replan_mode').value
         self.replan_period: float = float(self.get_parameter('replan_period').value)
         self.camera_name: str = self.get_parameter('camera').get_parameter_value().string_value
         self.resolution: float = float(self.get_parameter('resolution').value)
+        self.inflation_radius: float = float(self.get_parameter('inflation_radius').value)
 
         # ---------- OpenAI client ----------
         self.client = OpenAI(api_key=self.api_key or None)
@@ -94,13 +110,24 @@ class ExecutiveApiNode(Node):
         self.camera_matrix: np.ndarray | None = None
         self.dist_coeffs: np.ndarray | None = None
 
+        # ---------- Robot pose state ----------
+        # Latest NED (x, y) per robot, passed to map builders to overlay robot markers.
+        self.robot_poses: dict[str, tuple[float, float] | None] = {
+            name: None for name in self.robot_names}
+
         # ---------- ROS pubs/subs ----------
-        self.path_pub   = self.create_publisher(String, self.exec_path_topic, 1)
+        self.path_pub   = self.create_publisher(String, self.vlm_plan_topic, 1)
         self.prompt_sub = self.create_subscription(
             String, self.nav_prompt_topic, self.prompt_callback, 1
         )
         self.create_subscription(Image, self.camera_image_topic, self._camera_image_cb, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_cb, 1)
+        pose_qos = QoSProfile(depth=1)
+        pose_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        for name in self.robot_names:
+            self.create_subscription(
+                PoseStamped, f'/{name}/ned/pose_stamped',
+                self._make_pose_cb(name), pose_qos)
 
         # ---------- Replan trigger state ----------
         # current_prompt holds the latest operator goal (already suffixed with '\n\njson'); the
@@ -135,7 +162,7 @@ class ExecutiveApiNode(Node):
         the period is measured from the latest prompt.
         """
         self.get_logger().info(f"[exec] received /nav/prompt: {msg.data!r}")
-        self.current_prompt = msg.data + '\n\njson'
+        self.current_prompt = msg.data
 
         # Classify once per new prompt (not per replan tick): the task type doesn't change between
         # dynamic replans of the same instruction, so we stash it and reuse it in _run_plan().
@@ -161,7 +188,7 @@ class ExecutiveApiNode(Node):
         self._run_plan()
 
     # ------------------------------------------------------------------
-    # Core: build snapshot, call the VLM, publish /grid_path
+    # Core: build snapshot, call the VLM, publish /vlm_plan
     # ------------------------------------------------------------------
     def _run_plan(self) -> None:
         if self.current_prompt is None:
@@ -184,10 +211,7 @@ class ExecutiveApiNode(Node):
             # translate.py can read the occupancy without running its own CLIPSeg instance.
             run_segmentation(self)
 
-            # Resolve prompt + map from the classifier's task type. Both are scaffolding for now:
-            # an empty per-task prompt falls back to EXECUTIVE_SYSTEM_PROMPT, and every map builder
-            # currently returns the Battleship grid — so behavior is unchanged until they're filled.
-            system_prompt = PROMPT_BUILDERS[self.current_task_type]()
+            system_prompt = PROMPT_BUILDERS[self.current_task_type](self.current_prompt)
             map_b64 = MAP_BUILDERS[self.current_task_type](self)
 
             response = self.client.responses.create(
@@ -198,7 +222,6 @@ class ExecutiveApiNode(Node):
                     {
                         "role": "user",
                         "content": [
-                            { "type": "input_text", "text": self.current_prompt },
                             {
                                 "type": "input_image",
                                 "image_url": f"data:image/png;base64,{map_b64}",
@@ -217,30 +240,32 @@ class ExecutiveApiNode(Node):
                     f'Malformed JSON from model - cannot parse. Raw reply: {reply_json!r}')
                 return
 
-            # Validate + publish paths — must be a dict of {robot_name: [grid labels]} (the
-            # translator routes each robot's list to /<robot>/waypoint_path). Fail loudly if the
-            # model returns another shape.
-            paths = result.get('paths', {})
-            if not isinstance(paths, dict):
+            # The classifier's task type selects both the model output key and the downstream
+            # planner. Routes must be a dict of {robot_name: [labels]}; the translator routes
+            # each robot's list to /<robot>/waypoint_path via the named planner. Fail loudly on a
+            # bad shape.
+            result_key, planner = _TASK_ROUTING[self.current_task_type]
+            routes = result.get(result_key, {})
+            if not isinstance(routes, dict):
                 self.get_logger().error(
-                    f"Model 'paths' is not an object (got {type(paths).__name__}: {paths!r}); "
-                    "not publishing.")
+                    f"Model '{result_key}' is not an object (got {type(routes).__name__}: "
+                    f"{routes!r}); not publishing.")
                 return
-            bad = [n for n, p in paths.items() if not isinstance(p, list)]
+            bad = [n for n, p in routes.items() if not isinstance(p, list)]
             if bad:
                 self.get_logger().error(
-                    f"Model 'paths' has non-list routes for {bad}; not publishing.")
+                    f"Model '{result_key}' has non-list routes for {bad}; not publishing.")
                 return
-            missing = [n for n in self.robot_names if n not in paths]
+            missing = [n for n in self.robot_names if n not in routes]
             if missing:
                 self.get_logger().warn(
                     f"Model omitted a route for {missing}; those robots will not move.")
             path_msg = String()
-            path_msg.data = json.dumps(paths)
+            path_msg.data = json.dumps({"planner": planner, "routes": routes})
             self.path_pub.publish(path_msg)
 
             # Log through ROS logger (INFO)
-            self.get_logger().info(f"[exec] Planned paths: {path_msg.data}")
+            self.get_logger().info(f"[exec] Planned ({planner}) routes: {path_msg.data}")
             analysis = result.get('analysis', '')
             if analysis:
                 self.get_logger().info(f"[exec] analysis: {analysis}")
@@ -257,6 +282,11 @@ class ExecutiveApiNode(Node):
     def _camera_info_cb(self, msg: CameraInfo) -> None:
         self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
         self.dist_coeffs = np.array(msg.d, dtype=np.float64)
+
+    def _make_pose_cb(self, name: str):
+        def _cb(msg: PoseStamped) -> None:
+            self.robot_poses[name] = (msg.pose.position.x, msg.pose.position.y)
+        return _cb
 
     # ------------------------------------------------------------------
     # Helper: classify the instruction into a task type (first, text-only LLM call)

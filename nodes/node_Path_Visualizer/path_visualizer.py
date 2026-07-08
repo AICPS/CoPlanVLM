@@ -41,7 +41,7 @@ class PathVisualizer(Node):
         self.u_column = self.get_parameter("u_column").value
         self.v_column = self.get_parameter("v_column").value
 
-        self.path_topic = self.get_parameter("path_topic").value
+        self.vlm_plan_topic = self.get_parameter("vlm_plan_topic").value
         self.robot_names = [str(n) for n in self.get_parameter("robot_names").value]
         self.camera_image_topic = self.get_parameter("camera_image_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
@@ -92,8 +92,9 @@ class PathVisualizer(Node):
             Path(get_package_share_directory("talking-turtle")) / "path_overlay.png"
         )
 
-        # Single planner /grid_path (a {robot: [labels]} dict) + shared camera image + camera info.
-        self.create_subscription(String, self.path_topic, self._path_callback, 10)
+        # /vlm_plan ({planner, routes} wrapper, or a bare {robot: [labels]} dict) + shared camera
+        # image + camera info.
+        self.create_subscription(String, self.vlm_plan_topic, self._path_callback, 10)
         self.create_subscription(Image, self.camera_image_topic, self._camera_image_callback, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 1)
         # Per-robot world path + pose. Pose comes from /<name>/ned/pose_stamped (PoseStamped,
@@ -122,7 +123,7 @@ class PathVisualizer(Node):
         self.declare_parameter("u_column", "center_x")
         self.declare_parameter("v_column", "center_y")
 
-        self.declare_parameter("path_topic", "/grid_path")
+        self.declare_parameter("vlm_plan_topic", "/vlm_plan")
         self.declare_parameter("robot_names", ["raph", "donnie"])
         self.declare_parameter("camera_image_topic", "/camera_image")
         self.declare_parameter("camera_info_topic", "/ids_overhead/camera_info")
@@ -172,13 +173,18 @@ class PathVisualizer(Node):
         try:
             data = json.loads(msg.data)
         except json.JSONDecodeError:
-            self.get_logger().warn("/grid_path is not valid JSON")
+            self.get_logger().warn("/vlm_plan is not valid JSON")
             return
         if not isinstance(data, dict):
-            self.get_logger().warn("/grid_path is not a {robot: [labels]} object")
+            self.get_logger().warn("/vlm_plan is not a JSON object")
+            return
+        # Unwrap the {planner, routes} wrapper; a bare {robot: [labels]} object is also accepted.
+        routes = data.get("routes", data) if "routes" in data else data
+        if not isinstance(routes, dict):
+            self.get_logger().warn("/vlm_plan 'routes' is not a {robot: [labels]} object")
             return
         for name in self.robot_names:
-            labels = data.get(name, [])
+            labels = routes.get(name, [])
             self.latest_path_labels[name] = (
                 [str(x) for x in labels] if isinstance(labels, list) else [])
 
@@ -396,7 +402,7 @@ class PathVisualizer(Node):
             for i in range(len(world_pixels) - 1):
                 cv2.line(frame, world_pixels[i], world_pixels[i + 1], color, 2)
 
-            # VLM grid-label path from /grid_path as colored arrows.
+            # VLM label path from /vlm_plan as colored arrows.
             path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
             path_pixels = self._offset_polyline(path_pixels, offset)
             self._draw_grid_path(frame, path_pixels, color, name)

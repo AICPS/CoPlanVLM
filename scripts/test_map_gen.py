@@ -20,18 +20,22 @@ Output (debug/test_map_gen/):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image as PILImage
 
+from coord_transform import gazebo_to_ned
 from node_Executive_API.map_gen import (render_battleship_map, render_nav2point_map,
                                         _SEG_PROMPTS, _SEG_THRESHOLD)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PKG_DIR    = _SCRIPT_DIR.parent
+_WS_DIR     = _PKG_DIR.parent.parent   # src/VLM_mission_planning -> src -> workspace root
 _IMAGE      = _PKG_DIR / "overhead.png"
+_POSES_FILE = _WS_DIR / "test_data" / "poses.json"
 _OUT_DIR    = _PKG_DIR / "debug" / "test_map_gen"
 _RESOLUTION = 0.05
 
@@ -48,8 +52,15 @@ def main() -> None:
     img = PILImage.open(_IMAGE).convert("RGBA")
     print(f"Loaded: {_IMAGE}  ({img.size[0]}x{img.size[1]})")
 
+    robot_poses: dict[str, tuple[float, float] | None] = {}
+    if _POSES_FILE.exists():
+        raw = json.loads(_POSES_FILE.read_text())
+        for name, coords in raw.items():
+            robot_poses[name] = gazebo_to_ned(coords["x"], coords["y"])
+        print(f"Loaded poses for: {list(robot_poses)}")
+
     print("\n[1/2] Generating battleship overlay...")
-    render_battleship_map(img).save(_OUT_DIR / "battleship.png")
+    render_battleship_map(img, robot_poses=robot_poses, camera=args.camera).save(_OUT_DIR / "battleship.png")
     print(f"  Saved -> {_OUT_DIR / 'battleship.png'}")
 
     print("\n[2/2] Running CLIPSeg (first run loads the model)...")
@@ -59,7 +70,7 @@ def main() -> None:
     unique, counts = np.unique(pix_labels, return_counts=True)
     print(f"  pix_labels {pix_labels.shape}  [{', '.join(f'{v}:{n}' for v, n in zip(unique, counts))}]")
 
-    render_nav2point_map(img, pix_labels, args.camera, _RESOLUTION).save(_OUT_DIR / "nav2point.png")
+    render_nav2point_map(img, pix_labels, args.camera, _RESOLUTION, robot_poses=robot_poses).save(_OUT_DIR / "nav2point.png")
     print(f"  Saved -> {_OUT_DIR / 'nav2point.png'}")
 
     print(f"\nDone. Open {_OUT_DIR}/ to compare.")
