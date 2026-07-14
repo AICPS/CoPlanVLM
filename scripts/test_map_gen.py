@@ -24,11 +24,14 @@ import json
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image as PILImage
 
-from coord_transform import gazebo_to_ned
-from node_Executive_API.map_gen import (render_battleship_map, render_nav2point_map,
+from coord_transform import gazebo_to_ned, ned_to_world
+from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
+                               render_inflation_overlay, RESOLUTION as _RESOLUTION)
+from node_Executive_API.map_gen import (render_battleship_map, render_grid_points_map,
                                         _SEG_PROMPTS, _SEG_THRESHOLD)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -36,8 +39,7 @@ _PKG_DIR    = _SCRIPT_DIR.parent
 _WS_DIR     = _PKG_DIR.parent.parent   # src/VLM_mission_planning -> src -> workspace root
 _IMAGE      = _PKG_DIR / "overhead.png"
 _POSES_FILE = _WS_DIR / "test_data" / "poses.json"
-_OUT_DIR    = _PKG_DIR / "debug" / "test_map_gen"
-_RESOLUTION = 0.05
+_OUT_DIR    = _WS_DIR / "debug" / "test_map_gen"   # workspace-root debug/, not inside the package
 
 
 def main() -> None:
@@ -70,8 +72,17 @@ def main() -> None:
     unique, counts = np.unique(pix_labels, return_counts=True)
     print(f"  pix_labels {pix_labels.shape}  [{', '.join(f'{v}:{n}' for v, n in zip(unique, counts))}]")
 
-    render_nav2point_map(img, pix_labels, args.camera, _RESOLUTION, robot_poses=robot_poses).save(_OUT_DIR / "nav2point.png")
+    grid, meta = mask_to_occupancy(pix_labels, _RESOLUTION, camera=args.camera)   # raw (no overrides)
+    world_poses = [ned_to_world(*p) for p in robot_poses.values() if p]
+    # infl = overrides + inflate; cleared = post-override, pre-inflation (for the overlay's red layer).
+    infl, cleared = create_filtered_occupancy_map(grid, meta, world_poses, return_cleared=True)
+    render_grid_points_map(img, infl, meta, args.camera, robot_poses=robot_poses).save(_OUT_DIR / "nav2point.png")
     print(f"  Saved -> {_OUT_DIR / 'nav2point.png'}")
+
+    base_bgr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    overlay = render_inflation_overlay(base_bgr, cleared, infl, meta, args.camera)
+    cv2.imwrite(str(_OUT_DIR / "inflation_overlay.png"), overlay)
+    print(f"  Saved -> {_OUT_DIR / 'inflation_overlay.png'}")
 
     print(f"\nDone. Open {_OUT_DIR}/ to compare.")
 

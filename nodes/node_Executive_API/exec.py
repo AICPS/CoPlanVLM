@@ -6,7 +6,7 @@ Receives an operator goal prompt on `/nav/prompt`, and plans in two LLM
 calls:
 
 1. **Classifier** — a text‑only call tags the instruction with a task
-   type (`nav2point` / `manouver` / `coverage`; see prompt_gen.py).
+   type (`nav2point` / `maneuver` / `coverage`; see prompt_gen.py).
 2. **Planner** — a vision call that, given the selected per‑task system
    prompt and an overhead grid image, returns the route(s).
 
@@ -16,8 +16,8 @@ Publishes:
   ``{"planner": "astar"|"coverage", "routes": {robot_name: [labels]}}`` naming the downstream
   planner and each robot's label list.
 
-The task type selects the system prompt (`prompt_gen.PROMPT_BUILDERS`), the map overlay
-(`map_gen.MAP_BUILDERS`), and the downstream planner (`_TASK_ROUTING`).
+The task type (controller) drives `prompt_gen.generate_prompt`, which assembles the system prompt and
+renders the matching overlay image together, and selects the downstream planner (`_TASK_ROUTING`).
 
 No chat history is stored – each call is stateless.
 """
@@ -39,17 +39,23 @@ from cv_bridge import CvBridge
 from openai import OpenAI
 
 from node_Executive_API.prompt_gen import (
-    PROMPT_BUILDERS,
+    generate_prompt,
+    CONTROLLERS,
     CLASSIFIER_SYSTEM_PROMPT,
 )
-from node_Executive_API.map_gen import MAP_BUILDERS, run_segmentation
+from node_Executive_API.map_gen import run_segmentation, _node_to_pil
+
+
+def _overlay_for(controller: str) -> str:
+    """Production overlay per controller: coverage -> battleship grid, else set-of-marks."""
+    return "battleship" if controller == "coverage" else "points"
 
 # Task type -> (model output key, downstream planner published on /vlm_plan).
-# nav2point / manouver return ordered "waypoints" routed through A*; coverage returns an unordered
+# nav2point / maneuver return ordered "waypoints" routed through A*; coverage returns an unordered
 # "regions" cell set routed through the coverage (TSP) planner.
 _TASK_ROUTING = {
     "nav2point": ("waypoints", "astar"),
-    "manouver":  ("waypoints", "astar"),
+    "maneuver":  ("waypoints", "astar"),
     "coverage":  ("regions",   "coverage"),
 }
 
@@ -77,12 +83,8 @@ class ExecutiveApiNode(Node):
         # their own trigger that also calls _run_plan() — the VLM call body is never duplicated.
         self.declare_parameter('replan_mode', 'static')          # "static" | "dynamic"
         self.declare_parameter('replan_period', 120)            # seconds between dynamic replans
-        # Camera calibration key and occupancy grid resolution (passed to map builders via self).
+        # Camera calibration key (passed to map builders via self).
         self.declare_parameter('camera', 'gazebo')              # "gazebo" | "lab_test"
-        self.declare_parameter('resolution', 0.05)              # m / occupancy cell
-        # Obstacle inflation radius (m) applied once here in run_segmentation; the pre-inflated grid
-        # is shared with translate so the planner modules never inflate. TurtleBot4 radius ~0.17 m.
-        self.declare_parameter('inflation_radius', 0.5)
 
         self.robot_names: list[str] = list(self.get_parameter('robot_names').value)
         self.api_key: str   = self.get_parameter('openai_api_key').value
@@ -95,8 +97,6 @@ class ExecutiveApiNode(Node):
         self.replan_mode: str = self.get_parameter('replan_mode').value
         self.replan_period: float = float(self.get_parameter('replan_period').value)
         self.camera_name: str = self.get_parameter('camera').get_parameter_value().string_value
-        self.resolution: float = float(self.get_parameter('resolution').value)
-        self.inflation_radius: float = float(self.get_parameter('inflation_radius').value)
 
         # ---------- OpenAI client ----------
         self.client = OpenAI(api_key=self.api_key or None)
@@ -107,6 +107,9 @@ class ExecutiveApiNode(Node):
         # Live overhead camera inputs read by the map builders in map_gen.py.
         self.bridge = CvBridge()
         self.camera_image: Image | None = None
+        # Snapshot of robot_poses taken when camera_image was stored, so occupancy clearing frees the
+        # robots' footprints at their positions IN that frame (not a later, moved pose).
+        self.camera_image_poses: dict[str, tuple[float, float] | None] = {}
         self.camera_matrix: np.ndarray | None = None
         self.dist_coeffs: np.ndarray | None = None
 
@@ -134,10 +137,15 @@ class ExecutiveApiNode(Node):
         # dynamic-mode timer re-plans against whatever this currently holds, so "replan unless the
         # prompt changed" needs no extra bookkeeping — a new prompt simply overwrites it.
         self.current_prompt: str | None = None
-        # Task type chosen by the classifier for the current prompt; drives both the system prompt
-        # (PROMPT_BUILDERS) and the map overlay (MAP_BUILDERS).
+        # Task type (controller) chosen by the classifier for the current prompt; passed to
+        # generate_prompt, which builds the system prompt + overlay image and picks the planner.
         self.current_task_type: str | None = None
+        # Occupancy state written by map_gen.run_segmentation each replan tick: pix_labels (raw
+        # segmentation), plus the single inflated planning grid + meta the nav2point overlay filters
+        # against. None until the first segmentation runs.
         self.pix_labels: np.ndarray | None = None
+        self.occ_grid: np.ndarray | None = None
+        self.occ_meta: dict | None = None
         self._timer = None
         if self.replan_mode not in ('static', 'dynamic'):
             self.get_logger().warn(
@@ -211,8 +219,13 @@ class ExecutiveApiNode(Node):
             # translate.py can read the occupancy without running its own CLIPSeg instance.
             run_segmentation(self)
 
-            system_prompt = PROMPT_BUILDERS[self.current_task_type](self.current_prompt)
-            map_b64 = MAP_BUILDERS[self.current_task_type](self)
+            # generate_prompt assembles the system prompt AND renders the matching overlay image,
+            # so the two always agree. Production keeps today's overlay-per-controller + no CoT.
+            system_prompt, map_b64 = generate_prompt(
+                self.current_prompt, self.current_task_type,
+                _overlay_for(self.current_task_type),
+                pil_img=_node_to_pil(self), occ_grid=self.occ_grid, occ_meta=self.occ_meta,
+                camera=self.camera_name, robot_poses=self.robot_poses, cot=False)
 
             response = self.client.responses.create(
                 model=self.model,
@@ -278,6 +291,8 @@ class ExecutiveApiNode(Node):
     # ------------------------------------------------------------------
     def _camera_image_cb(self, msg: Image) -> None:
         self.camera_image = msg
+        # Freeze the poses that go with this frame (see camera_image_poses).
+        self.camera_image_poses = dict(self.robot_poses)
 
     def _camera_info_cb(self, msg: CameraInfo) -> None:
         self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
@@ -292,7 +307,7 @@ class ExecutiveApiNode(Node):
     # Helper: classify the instruction into a task type (first, text-only LLM call)
     # ------------------------------------------------------------------
     def _classify_task(self, instruction: str) -> str | None:
-        """Return one of PROMPT_BUILDERS' keys, or None if the classifier can't produce a valid one.
+        """Return one of CONTROLLERS, or None if the classifier can't produce a valid one.
 
         A None result means "don't plan this prompt" — there is no default task type to fall back on.
         """
@@ -310,7 +325,7 @@ class ExecutiveApiNode(Node):
             )
             result = self._parse_json_reply(response.output_text.strip())
             task_type = (result or {}).get('task_type')
-            if task_type in PROMPT_BUILDERS:
+            if task_type in CONTROLLERS:
                 return task_type
             self.get_logger().warn(f"Classifier returned unknown task_type {task_type!r}.")
         except Exception as exc:

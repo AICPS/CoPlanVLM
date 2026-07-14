@@ -77,8 +77,9 @@ class SimplePathTranslator(Node):
         self.declare_parameter("camera", "gazebo")
 
         # ─── Obstacle-aware planning params ───────────────────────────────────
+        # Resolution is NOT a param here: it travels in the occupancy snapshot's meta (written by
+        # exec) and is read from there per message, so translate never needs its own copy.
         self.declare_parameter("image_topic", "/ids_overhead/image")
-        self.declare_parameter("resolution", 0.05)              # m / occupancy cell
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
 
@@ -97,7 +98,6 @@ class SimplePathTranslator(Node):
 
         self.camera_name: str = self.get_parameter("camera").get_parameter_value().string_value
         self.image_topic = self.get_parameter("image_topic").value
-        self.resolution = self.get_parameter("resolution").value
 
         self.save_debug = self.get_parameter("save_debug").value
         self.debug_dir = self.get_parameter("debug_dir").value
@@ -259,6 +259,9 @@ class SimplePathTranslator(Node):
         snap = np.load(_OCC_FILE)
         pix_labels = snap["pix_labels"]
         grid = snap["grid"]
+        # Post-override, pre-inflation grid — the red layer for the inflation overlay. Fall back to the
+        # raw grid for older snapshots that predate the `cleared` key.
+        cleared = snap["cleared"] if "cleared" in snap.files else grid
         meta = {"resolution": float(snap["resolution"]),
                 "origin_x": float(snap["origin_x"]), "origin_y": float(snap["origin_y"]),
                 "width": int(snap["width"]), "height": int(snap["height"])}
@@ -298,7 +301,8 @@ class SimplePathTranslator(Node):
                     base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
                     self._save_common_debug(out_dir, base, pix_labels, grid)
                     dbg["start_world"] = cur_xy
-                    planner.save_debug(out_dir, base, grid, meta, ctx, dbg, self.plan_params, camera=self.camera_name)
+                    # Pass `cleared` (post-override occupancy) as the overlay's red layer.
+                    planner.save_debug(out_dir, base, cleared, meta, ctx, dbg, self.plan_params, camera=self.camera_name)
                 except Exception as exc:  # noqa: BLE001
                     self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 

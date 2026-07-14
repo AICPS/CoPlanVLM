@@ -1,17 +1,15 @@
 """Per-task-type overhead-map builders for the Executive node.
 
-The classifier tags each instruction with a task type; the Executive then renders the overhead map
-best suited to that behavior via ``MAP_BUILDERS[task_type](node)``. Each builder receives the
-``ExecutiveApiNode`` so it can read the live camera frame and intrinsics off it
-(``node.camera_image``, ``node.bridge``, ``node.camera_matrix``, ``node.dist_coeffs``). Static map
-assets (e.g. the grid overlay PNG) are loaded and cached here, not on the node.
+The classifier tags each instruction with a controller; ``prompt_gen.generate_prompt`` then renders
+the overhead overlay best suited to that behavior via the ``render_*`` functions here (paired to a
+``map_overlay_type``). Each renderer is a pure PIL-in/PIL-out function; ``_node_to_pil`` and ``_to_b64``
+extract the live camera frame off the ``ExecutiveApiNode`` (``node.camera_image``, ``node.bridge``,
+``node.camera_matrix``, ``node.dist_coeffs``). Static map assets are loaded and cached here.
 
 CLIPSeg lives here (not in translate.py). ``run_segmentation(node)`` is called by exec once per
 replan tick; it runs CLIPSeg on the current camera frame, stores ``node.pix_labels``, and writes
 the result to ``_OCC_FILE`` so that translate.py can read it instead of running its own instance.
 This keeps the model in one process and avoids a ROS topic for the occupancy data.
-
-Mirrors ``prompt_gen.PROMPT_BUILDERS``.
 """
 
 from __future__ import annotations
@@ -29,7 +27,8 @@ from ament_index_python.packages import get_package_share_directory
 
 from coord_transform import pixel_to_world, world_to_pixel, ned_to_world
 from obs_seg import FREE
-from obs_seg.occupancy import mask_to_occupancy, inflate_occupancy, world_to_cell
+from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
+                               world_to_cell, RESOLUTION)
 
 # ── Shared occupancy file ──────────────────────────────────────────────────────
 # exec writes the occupancy snapshot here; translate reads it instead of running CLIPSeg or
@@ -57,6 +56,16 @@ _ROBOT_COLORS  = [                  # per-robot colors (RGB), cycled by index
 ]
 _SEG_PROMPTS   = ["the floor"]
 _SEG_THRESHOLD = 0.48
+
+# Label font (loaded once): DejaVuSans at _LABEL_SIZE, falling back to PIL's default if unavailable.
+try:
+    _LABEL_FONT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                                     size=_LABEL_SIZE)
+except OSError:
+    _LABEL_FONT = ImageFont.load_default()
+
+# Occupancy-grid parameters (resolution, inflation radius) are the single source of truth in
+# obs_seg.occupancy (RESOLUTION, INFLATION_RADIUS) — not duplicated here.
 
 
 @lru_cache(maxsize=1)
@@ -97,11 +106,20 @@ def run_segmentation(node) -> None:
     pix_labels, _ = _get_segmenter().classify(rgb, _SEG_PROMPTS, [], _SEG_THRESHOLD)
     node.pix_labels = pix_labels
 
-    grid, meta = mask_to_occupancy(pix_labels, node.resolution, camera=node.camera_name)
-    infl = inflate_occupancy(grid, node.resolution, node.inflation_radius)
+    grid, meta = mask_to_occupancy(pix_labels, RESOLUTION, camera=node.camera_name)
+    # Clear the edge ring + each robot's own footprint (at the frame's captured poses), then inflate.
+    world_poses = [ned_to_world(x, y)
+                   for (x, y) in (node.camera_image_poses or {}).values() if (x, y) is not None]
+    infl, cleared = create_filtered_occupancy_map(grid, meta, world_poses, return_cleared=True)
+    # Cache the inflated grid + meta on the node so the nav2point overlay filters against the same
+    # single inflated grid (rather than re-inflating from pix_labels).
+    node.occ_grid = infl
+    node.occ_meta = meta
 
+    # npz: grid = raw CLIPSeg map; cleared = post-override, pre-inflation (red layer for overlays);
+    # infl = final planning grid (overrides + inflation), what the planner consumes.
     os.makedirs(os.path.dirname(_OCC_FILE), exist_ok=True)
-    np.savez(_OCC_FILE, pix_labels=pix_labels, grid=grid, infl=infl,
+    np.savez(_OCC_FILE, pix_labels=pix_labels, grid=grid, cleared=cleared, infl=infl,
              resolution=meta["resolution"], origin_x=meta["origin_x"],
              origin_y=meta["origin_y"], width=meta["width"], height=meta["height"])
 
@@ -195,12 +213,7 @@ def render_battleship_map(img_rgba: PILImage.Image,
     gd.rectangle([(0, 0), (w - 1, h - 1)], outline=_GRID_COLOR, width=_GRID_WIDTH)
     result = PILImage.alpha_composite(img_rgba, grid_layer)
 
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                                  size=_LABEL_SIZE)
-    except OSError:
-        font = ImageFont.load_default()
-
+    font = _LABEL_FONT
     draw = ImageDraw.Draw(result)
     pad = 2
     occupied: list[tuple] = []
@@ -219,32 +232,27 @@ def render_battleship_map(img_rgba: PILImage.Image,
     return result
 
 
-def render_nav2point_map(img_rgba: PILImage.Image, pix_labels: np.ndarray | None,
-                         camera: str, resolution: float,
-                         robot_poses: dict | None = None) -> PILImage.Image:
-    """Draw set-of-marks dots at free-space grid centers on an RGBA image.
+def _render_marks(img_rgba: PILImage.Image, centers: list, occ_grid: np.ndarray | None,
+                  occ_meta: dict | None, camera: str,
+                  robot_poses: dict | None = None) -> PILImage.Image:
+    """Draw labeled set-of-marks dots for `centers` [(label, u, v), …] on an RGBA image.
 
-    When pix_labels is None, all grid marks are shown (no obstacle filtering).
+    `occ_grid`/`occ_meta` are the pre-inflated planning grid + meta (built once upstream in
+    run_segmentation); marks are filtered directly against that single inflated grid — this never
+    inflates. When occ_grid is None, all provided marks are shown (no obstacle filtering).
     """
-    if pix_labels is not None:
-        grid, meta = mask_to_occupancy(pix_labels, resolution, camera=camera)
-        inflated = inflate_occupancy(grid, resolution)
+    if occ_grid is not None:
         free_cells = []
-        for label, u, v in _load_grid_centers():
+        for label, u, v in centers:
             wx, wy = pixel_to_world(u, v, camera=camera)
-            gx, gy = world_to_cell(wx, wy, meta)
-            if (0 <= gx < meta['width'] and 0 <= gy < meta['height']
-                    and inflated[gy, gx] == FREE):
+            gx, gy = world_to_cell(wx, wy, occ_meta)
+            if (0 <= gx < occ_meta['width'] and 0 <= gy < occ_meta['height']
+                    and occ_grid[gy, gx] == FREE):
                 free_cells.append((label, u, v))
     else:
-        free_cells = list(_load_grid_centers())
+        free_cells = list(centers)
 
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                                  size=_LABEL_SIZE)
-    except OSError:
-        font = ImageFont.load_default()
-
+    font = _LABEL_FONT
     result = img_rgba.copy()
     draw = ImageDraw.Draw(result)
     r = _DOT_RADIUS
@@ -264,6 +272,99 @@ def render_nav2point_map(img_rgba: PILImage.Image, pix_labels: np.ndarray | None
     return result
 
 
+def render_grid_points_map(img_rgba: PILImage.Image, occ_grid: np.ndarray | None,
+                           occ_meta: dict | None, camera: str,
+                           robot_poses: dict | None = None) -> PILImage.Image:
+    """Draw a blue set-of-marks dot at EVERY grid center (all 112 cells); no obstacle filtering.
+
+    ``occ_grid``/``occ_meta`` are accepted for a uniform renderer interface but ignored here — every
+    grid point is marked regardless of occupancy (passing occ_grid=None skips the free-cell filter).
+    """
+    return _render_marks(img_rgba, _load_grid_centers(), None, None, camera, robot_poses)
+
+
+def _cell_is_free(u: float, v: float, occ_grid: np.ndarray | None,
+                  occ_meta: dict | None, camera: str) -> bool:
+    """Is the grid center at pixel (u, v) FREE in the inflated grid? None grid -> treated as free.
+
+    Non-free = occupied / unknown / out-of-bounds of the inflated planning grid. Shared by the marked
+    overlay and the textual grid so their blocked/open classification can never disagree.
+    """
+    if occ_grid is None:
+        return True
+    wx, wy = pixel_to_world(u, v, camera=camera)
+    gx, gy = world_to_cell(wx, wy, occ_meta)
+    return (0 <= gx < occ_meta['width'] and 0 <= gy < occ_meta['height']
+            and occ_grid[gy, gx] == FREE)
+
+
+def render_obstacle_marked_map(img_rgba: PILImage.Image, occ_grid: np.ndarray | None,
+                               occ_meta: dict | None, camera: str,
+                               robot_poses: dict | None = None) -> PILImage.Image:
+    """Draw a labeled mark at EVERY grid center, distinguishing free vs obstacle cells.
+
+    Unlike render_grid_points_map (which hides obstacle cells), this marks them: FREE cells get a blue
+    dot + blue label, non-free cells (occupied / unknown / out-of-bounds of the inflated grid) get a
+    red X + red label. Both keep their alphanumeric label + light-gray text box, so the VLM sees where
+    obstacles / objects of interest are. When occ_grid is None, every cell is treated as free.
+    """
+    font = _LABEL_FONT
+    result = img_rgba.copy()
+    draw = ImageDraw.Draw(result)
+    r = _DOT_RADIUS
+    pad = 2
+    occupied: list[tuple] = []
+    for label, u, v in _load_grid_centers():
+        is_free = _cell_is_free(u, v, occ_grid, occ_meta, camera)
+        color = (0, 0, 255) if is_free else (255, 0, 0)   # blue free, red obstacle (RGB)
+        if is_free:
+            draw.ellipse((u - r, v - r, u + r, v + r), fill=color)
+        else:
+            draw.line([(u - r, v - r), (u + r, v + r)], fill=color, width=3)
+            draw.line([(u - r, v + r), (u + r, v - r)], fill=color, width=3)
+        occupied.append((u - r, v - r, u + r, v + r))
+        tx, ty = u + r + 3, v - _LABEL_SIZE // 2
+        bbox = draw.textbbox((tx, ty), label, font=font)
+        box = (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad)
+        draw.rectangle(box, fill=(220, 220, 220))
+        draw.text((tx, ty), label, fill=color, font=font)
+        occupied.append(box)
+    _draw_robot_markers(draw, robot_poses, camera, font, occupied=occupied)
+    return result
+
+
+def grid_status_text(occ_grid: np.ndarray | None, occ_meta: dict | None, camera: str) -> str:
+    """Return a 2D ASCII grid of cell status: '.' = open (FREE), 'X' = blocked (non-free).
+
+    Rows 1-8 top->bottom, columns A-N left->right — matching the image and the occupancy classification
+    used by render_obstacle_marked_map (via _cell_is_free), so the visual marks and this text agree.
+    Intended to be embedded in the marked-text / CoT prompts.
+    """
+    centers = {label: (u, v) for label, u, v in _load_grid_centers()}
+    header = "     " + " ".join(chr(ord('A') + c) for c in range(_N_COLS))
+    lines = [header]
+    for row in range(1, _N_ROWS + 1):
+        cells = []
+        for c in range(_N_COLS):
+            label = f"{chr(ord('A') + c)}{row}"
+            uv = centers.get(label)
+            free = _cell_is_free(uv[0], uv[1], occ_grid, occ_meta, camera) if uv else False
+            cells.append("." if free else "X")
+        lines.append(f"  {row}  " + " ".join(cells))
+    return "\n".join(lines)
+
+
+def blocked_cell_labels(occ_grid: np.ndarray | None, occ_meta: dict | None, camera: str) -> list[str]:
+    """Return the alphanumeric labels of grid cells marked NOT passable (red X).
+
+    Uses the same _cell_is_free classification as render_obstacle_marked_map and grid_status_text, so
+    this list, the image's red X marks, and the ascii grid can never disagree. Order follows
+    _load_grid_centers() (CSV order). occ_grid=None -> every cell free -> empty list.
+    """
+    return [label for label, u, v in _load_grid_centers()
+            if not _cell_is_free(u, v, occ_grid, occ_meta, camera)]
+
+
 # ── Node wrappers (ROS image extraction + base64 encoding) ────────────────────
 
 def _node_to_pil(node) -> PILImage.Image:
@@ -278,41 +379,3 @@ def _to_b64(pil_img: PILImage.Image) -> str:
     buf = io.BytesIO()
     pil_img.save(buf, format='PNG')
     return base64.b64encode(buf.getvalue()).decode('utf-8')
-
-
-def generate_battleship_map(node) -> str:
-    """Composite the live overhead frame with the Battleship grid overlay; return base64 PNG."""
-    if node.camera_image is None:
-        raise RuntimeError("No camera image received yet — is the camera publishing?")
-    return _to_b64(render_battleship_map(_node_to_pil(node),
-                                         robot_poses=node.robot_poses,
-                                         camera=node.camera_name))
-
-
-# ── Per-task map builders ──────────────────────────────────────────────────────
-
-def gen_nav2point_map(node) -> str:
-    """Set-of-marks overlay: draw labeled dots only at grid cell centers in free space."""
-    if node.camera_image is None:
-        raise RuntimeError("No camera image received yet — is the camera publishing?")
-    return _to_b64(render_nav2point_map(
-        _node_to_pil(node), node.pix_labels, node.camera_name, node.resolution,
-        robot_poses=node.robot_poses))
-
-
-def gen_manouver_map(node) -> str:
-    """Map overlay for multi-waypoint maneuvers — the Battleship grid."""
-    return generate_battleship_map(node)
-
-
-def gen_coverage_map(node) -> str:
-    """Map overlay for area coverage. TODO: coverage-specific overlay; grid for now."""
-    return generate_battleship_map(node)
-
-
-# Dispatch registry: task type -> map builder. Keys match prompt_gen.PROMPT_BUILDERS.
-MAP_BUILDERS = {
-    "nav2point": gen_nav2point_map,
-    "manouver": gen_manouver_map,
-    "coverage": gen_coverage_map,
-}
