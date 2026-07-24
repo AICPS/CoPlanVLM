@@ -40,12 +40,22 @@ INFLATION_RADIUS = 0.45
 
 # Pre-inflation traversability overrides (see create_filtered_occupancy_map). Both promote UNKNOWN to
 # FREE — they never override a genuine OCCUPIED cell — and are applied before inflation.
-#   EDGE_CLEAR_MARGIN  — outer border ring cleared; CLIPSeg confidence is poor at the image margins,
-#                        so the frame's outer ring is spuriously UNKNOWN (untraversable).
-#   ROBOT_CLEAR_RADIUS — disk cleared around each robot's own pose; a robot occludes the floor it
-#                        stands on in the overhead frame, so its footprint is UNKNOWN (self-blocking).
-EDGE_CLEAR_MARGIN  = 0.5
-ROBOT_CLEAR_RADIUS = 0.5
+#   EDGE_CLEAR_MARGIN_PX — outer border ring cleared, defined in SOURCE-IMAGE PIXELS. CLIPSeg confidence
+#                          is poor at the image margins, and that unreliable band is ~constant in image
+#                          pixels regardless of camera mounting height — whereas a fixed METRIC width
+#                          maps to very different image regions per camera (0.5 m = ~61 px on the high
+#                          gazebo cam vs ~112 px on the lower lab cam). Converted to occupancy cells
+#                          per-axis via the image->grid resample ratio (see _px_margin_to_cells).
+#   ROBOT_CLEAR_RADIUS   — disk cleared around each robot's own pose (METRES; a physical footprint). A
+#                          robot occludes the floor it stands on, so its footprint reads as UNKNOWN.
+EDGE_CLEAR_MARGIN_PX = 65
+ROBOT_CLEAR_RADIUS   = 0.65
+
+# Post-inflation hard perimeter wall (see _stamp_edge_wall / create_filtered_occupancy_map). The outer
+# EDGE_WALL_MARGIN-metre ring is forced OCCUPIED AFTER inflation, so the frame border is a crisp
+# fixed-width wall with no inward inflation halo. This is a physical standoff distance, so it stays in
+# METRES (unlike the pixel-based clear); kept separate so the two tune independently.
+EDGE_WALL_MARGIN     = 0.3
 
 # internal priority codes for conservative aggregation (higher wins)
 _C_NONE, _C_FREE, _C_UNKNOWN, _C_OBSTACLE = -1, 0, 1, 2
@@ -115,9 +125,30 @@ def mask_to_occupancy(pix_labels: np.ndarray,
     grid[cell_code == _C_OBSTACLE] = OCCUPIED
     # _C_UNKNOWN and _C_NONE remain UNKNOWN
 
+    # img_width/img_height (the source pixel dims) let the edge overrides define their margin in image
+    # pixels instead of metres — the grid is an axis-aligned resample of the image, so a pixel border
+    # converts to a per-axis cell band via grid_cells/img_pixels (see _px_margin_to_cells).
     meta = dict(resolution=float(resolution), origin_x=x_min, origin_y=y_min,
-                width=width, height=height)
+                width=width, height=height, img_width=int(w_img), img_height=int(h_img))
     return grid, meta
+
+
+def _px_margin_to_cells(margin_px: float, meta: dict) -> Tuple[int, int]:
+    """A source-image pixel margin -> (k_col, k_row) occupancy-cell border thickness per axis.
+
+    The occupancy grid is an axis-aligned resample of the source image (mask_to_occupancy scatters every
+    image pixel into a world cell), so the outer ring of the grid corresponds to the image border and
+    cells-per-pixel is grid_cells/img_pixels along each axis. Defining a margin in image pixels (not
+    metres) keeps the cleared band consistent across cameras with different mounting heights: CLIPSeg's
+    unreliable border is ~constant in pixels, while its metric width is not. Requires img_width/img_height
+    in meta (added by mask_to_occupancy); if absent, returns (0, 0) so no band is applied.
+    """
+    iw, ih = meta.get("img_width"), meta.get("img_height")
+    if not iw or not ih:
+        return 0, 0
+    k_col = int(round(margin_px * meta["width"] / iw))
+    k_row = int(round(margin_px * meta["height"] / ih))
+    return k_col, k_row
 
 
 def _apply_free_overrides(grid: np.ndarray, meta: dict, world_poses=None) -> np.ndarray:
@@ -127,14 +158,15 @@ def _apply_free_overrides(grid: np.ndarray, meta: dict, world_poses=None) -> np.
     grid BEFORE inflation. Two overrides, both of which ONLY affect cells that are
     currently UNKNOWN (a genuine OCCUPIED cell is never cleared):
 
-      * Edge ring: every cell within EDGE_CLEAR_MARGIN metres of the map border. CLIPSeg confidence
-        is poor at the image margins, so the outer ring is spuriously UNKNOWN.
+      * Edge ring: every cell within EDGE_CLEAR_MARGIN_PX SOURCE-IMAGE PIXELS of the map border (converted
+        to a per-axis cell band). CLIPSeg confidence is poor at the image margins, so the outer ring is
+        spuriously UNKNOWN; a pixel width keeps this consistent across camera mounting heights.
       * Robot disks: every cell within ROBOT_CLEAR_RADIUS metres of a robot's world pose. A robot
         occludes the floor it stands on, so its own footprint reads as UNKNOWN.
 
     Args:
         grid:        int8 (H, W) occupancy grid (FREE/OCCUPIED/UNKNOWN); NOT modified.
-        meta:        grid meta from mask_to_occupancy (resolution, origin_x, origin_y, width, height).
+        meta:        grid meta from mask_to_occupancy (resolution, origin_*, width/height, img_*).
         world_poses: iterable of (x, y) robot positions in the WORLD frame, or None. Callers convert
                      from NED (ned_to_world) before passing. None/empty -> edge clearing only.
 
@@ -144,11 +176,14 @@ def _apply_free_overrides(grid: np.ndarray, meta: dict, world_poses=None) -> np.
     height, width = out.shape
     res = meta["resolution"]
 
-    # Edge ring: outer k-cell border, where k = EDGE_CLEAR_MARGIN in cells.
-    k = int(round(EDGE_CLEAR_MARGIN / res))
-    if k > 0:
+    # Edge ring: outer border of EDGE_CLEAR_MARGIN_PX image pixels, as per-axis cell bands.
+    k_col, k_row = _px_margin_to_cells(EDGE_CLEAR_MARGIN_PX, meta)
+    if k_col > 0 or k_row > 0:
         edge = np.zeros((height, width), dtype=bool)
-        edge[:k, :] = edge[-k:, :] = edge[:, :k] = edge[:, -k:] = True
+        if k_row > 0:
+            edge[:k_row, :] = edge[-k_row:, :] = True
+        if k_col > 0:
+            edge[:, :k_col] = edge[:, -k_col:] = True
         out[edge & (out == UNKNOWN)] = FREE
 
     # Robot disks: ROBOT_CLEAR_RADIUS around each pose's cell.
@@ -183,21 +218,45 @@ def inflate_occupancy(grid: np.ndarray, resolution: float) -> np.ndarray:
     return inflated
 
 
+def _stamp_edge_wall(grid: np.ndarray, meta: dict) -> None:
+    """Force the outer EDGE_WALL_MARGIN-metre ring OCCUPIED, in place.
+
+    Applied AFTER inflation so the perimeter is a crisp fixed-width wall with no inward inflation halo:
+    the edge UNKNOWN is first cleared to FREE before inflation (see _apply_free_overrides), then this
+    reasserts a hard boundary of exactly EDGE_WALL_MARGIN metres. Unlike the UNKNOWN-only edge clear, this
+    overrides whatever is in the ring (FREE/UNKNOWN/OCCUPIED alike), so the planner keeps the robot off
+    the frame border.
+    """
+    k = int(round(EDGE_WALL_MARGIN / meta["resolution"]))
+    if k > 0:
+        grid[:k, :] = grid[-k:, :] = grid[:, :k] = grid[:, -k:] = OCCUPIED
+
+
 def create_filtered_occupancy_map(grid: np.ndarray, meta: dict, world_poses=None,
                                   return_cleared: bool = False):
-    """Turn a raw occupancy grid into the final planning grid: traversability overrides, then inflate.
+    """Turn a raw occupancy grid into the final planning grid: traversability overrides, inflate, wall.
 
-    Single entry point (used by exec and the offline harnesses) so the "clear edges/footprints, then
-    inflate obstacles" sequence lives in exactly one place. `grid`/`meta` come from mask_to_occupancy;
-    `world_poses` is an iterable of world-frame (x, y) robot positions, or None (callers convert from
-    NED). The input grid is not modified — pass it separately if you want to keep the raw map.
+    Single entry point (used by exec and the offline harnesses) so the "clear edges/footprints, inflate
+    obstacles, then stamp the hard perimeter wall" sequence lives in exactly one place. `grid`/`meta` come
+    from mask_to_occupancy; `world_poses` is an iterable of world-frame (x, y) robot positions, or None
+    (callers convert from NED). The input grid is not modified — pass it separately if you want to keep
+    the raw map.
+
+    The outer EDGE_WALL_MARGIN-metre ring is forced OCCUPIED AFTER inflation, giving a crisp fixed-width
+    border with no inward inflation halo (the edge UNKNOWN was cleared to FREE before inflation). The wall
+    is also stamped into `cleared` — which is never re-inflated — so it renders as a true obstacle (red)
+    in the debug overlays, not as inflation margin (yellow).
 
     Returns the inflated planning grid. If `return_cleared` is True, returns
-    ``(inflated, cleared)`` where `cleared` is the post-override, pre-inflation grid (useful for
-    debug visualizations that want to show what the overrides changed before inflation).
+    ``(inflated, cleared)`` where `cleared` is the post-override, pre-inflation grid (plus the perimeter
+    wall) used as the red layer in debug visualizations.
     """
     cleared = _apply_free_overrides(grid, meta, world_poses)
     inflated = inflate_occupancy(cleared, meta["resolution"])
+    # Hard perimeter wall, stamped post-inflation so it stays a crisp EDGE_WALL_MARGIN-metre border. Also
+    # applied to `cleared` (not re-inflated) so the overlays show it red rather than yellow.
+    _stamp_edge_wall(inflated, meta)
+    _stamp_edge_wall(cleared, meta)
     return (inflated, cleared) if return_cleared else inflated
 
 

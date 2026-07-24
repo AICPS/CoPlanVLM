@@ -365,6 +365,18 @@ def blocked_cell_labels(occ_grid: np.ndarray | None, occ_meta: dict | None, came
             if not _cell_is_free(u, v, occ_grid, occ_meta, camera)]
 
 
+def free_cell_labels(occ_grid: np.ndarray | None, occ_meta: dict | None, camera: str) -> list[str]:
+    """Return the labels of grid cells that ARE passable (blue dots) — the complement of
+    blocked_cell_labels, using the same _cell_is_free classification. Order follows _load_grid_centers()
+    (CSV order). occ_grid=None -> every cell free -> all labels.
+
+    Intended as the allowed-value set for structured-output enums, so the VLM cannot select an
+    obstacle cell as a waypoint.
+    """
+    return [label for label, u, v in _load_grid_centers()
+            if _cell_is_free(u, v, occ_grid, occ_meta, camera)]
+
+
 # ── Node wrappers (ROS image extraction + base64 encoding) ────────────────────
 
 def _node_to_pil(node) -> PILImage.Image:

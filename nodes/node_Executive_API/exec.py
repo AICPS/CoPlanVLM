@@ -279,9 +279,9 @@ class ExecutiveApiNode(Node):
 
             # Log through ROS logger (INFO)
             self.get_logger().info(f"[exec] Planned ({planner}) routes: {path_msg.data}")
-            analysis = result.get('analysis', '')
-            if analysis:
-                self.get_logger().info(f"[exec] analysis: {analysis}")
+            reasoning = result.get('reasoning', '')
+            if reasoning:
+                self.get_logger().info(f"[exec] reasoning: {reasoning}")
 
         except Exception as exc:
             self.get_logger().error(f'Path‑planning failed: {exc}')

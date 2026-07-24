@@ -6,23 +6,25 @@ segmentation → prompt + map overlay → planner → debug images. It reuses th
 (prompt_gen.generate_prompt), overlays (map_gen) and planners (node_Path_Translator) as the live
 exec/translate nodes, so what you see here is what the robots would get.
 
-The controller and overlay are chosen explicitly (the classifier is kept in-code but not used here):
-    --planner {nav2point, maneuver, coverage}   controller / low-level planner (required)
-    --map-overlay {points, marked_obs, battleship}   overlay style rendered + described (required)
-    --cot                                        append the generic chain-of-thought scaffold
+By default the classifier LLM chooses the controller from the prompt, and the overlay + CoT follow:
+    --planner {nav2point, maneuver, coverage}   optional; if omitted, the classifier chooses it
+    --map-overlay {points, marked_obs, battleship}   optional; default marked_obs (all controllers)
+    --cot / --no-cot                             chain-of-thought scaffold (default: on)
 
 Usage (from workspace root):
+    # Classifier-first (default): only the prompt is required.
     python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
-        --planner nav2point --map-overlay points \\
-        --prompt "Send raph to the chair and donnie to the table"
+        --prompt "Have raph loop around the chair and return to its start"
 
+    # Fully manual: pin the controller and overlay explicitly.
     python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
-        --planner coverage --map-overlay battleship \\
-        --prompt "Have the robots patrol the left side of the room"
+        --planner nav2point --map-overlay points --no-cot \\
+        --prompt "Send raph to the chair and donnie to the table"
 
 Output (written to --out, default debug/offline_test/):
     vlm_overlay.png       — the exact overlay image sent to the VLM (grid/marks + robot markers)
     robot_paths.png       — both robots' planned trajectories overlaid on the clean overhead image
+    robot_paths_waypoints.png — planned trajectories + each robot's labeled VLM waypoint picks
   and per robot in <out>/<robot_name>/:
     raw_overhead.png      — the loaded image
     segmentation.png      — CLIPSeg overlay (green=free, red=obstacle)
@@ -44,6 +46,7 @@ import math
 import os
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 import cv2
@@ -125,7 +128,7 @@ def _openai_client():
     return OpenAI(api_key=api_key)
 
 
-# NOTE: kept for later use — currently unused because the planner is chosen explicitly via --planner.
+# Default controller selector: runs when --planner is omitted (manual --planner skips it).
 def _classify(prompt: str, model: str, temperature: float) -> str:
     """First call: text-only classifier -> controller (one of CONTROLLERS)."""
     client = _openai_client()
@@ -143,14 +146,71 @@ def _classify(prompt: str, model: str, temperature: float) -> str:
     return task_type
 
 
+def _format_reasoning(text: str, width: int = 100) -> str:
+    """Reflow a single-line reasoning string into readable lines: each numbered step "N)" starts a new
+    line, lettered sub-steps "a)"/"b)" are indented, and long lines are wrapped to `width`."""
+    text = re.sub(r"\s*(?<![\w])(\d+\))\s*", r"\n\1 ", text)         # "1)" .. -> own line
+    text = re.sub(r"\s*(?<![\w])([a-z]\))\s+", r"\n   \1 ", text)    # "a)"/"b)" -> indented
+    out = []
+    for ln in text.splitlines():
+        ln = ln.rstrip()
+        if not ln:
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        out.append(textwrap.fill(ln, width=width, subsequent_indent=" " * (indent + 4)))
+    return "\n".join(out)
+
+
+def _route_schema(result_key: str, robot_names: list[str], cot: bool,
+                  allowed_labels: list[str] | None = None) -> dict:
+    """Strict JSON Schema for the planner reply — enforced via Responses API structured outputs.
+
+    Always: {result_key: {<robot>: [labels] for each robot}}. additionalProperties:false + a fixed
+    robot roster means the model CANNOT emit extra keys (e.g. a "raph_donnie" shared route) — the
+    structure is guaranteed by constrained decoding, not by asking in the prompt.
+
+    When allowed_labels is given, every waypoint is constrained to that enum (the free/blue-dot cells),
+    so the model physically CANNOT select an obstacle cell — obstacle avoidance enforced at decode time,
+    not merely requested in the prompt.
+
+    When cot=True a leading free-text "reasoning" string field is added. Structured outputs fill
+    properties in declaration order, so the model writes its full reasoning trace FIRST and the routes
+    are conditioned on it — real chain-of-thought, in one call, with the answer keys still locked.
+    """
+    item_schema = {"type": "string"}
+    if allowed_labels:
+        item_schema = {"type": "string", "enum": list(allowed_labels)}
+    route_obj = {
+        "type": "object", "additionalProperties": False,
+        "required": list(robot_names),
+        "properties": {name: {"type": "array", "items": item_schema} for name in robot_names},
+    }
+    properties: dict = {}
+    required: list[str] = []
+    if cot:                                    # declared first -> generated (reasoned) first
+        properties["reasoning"] = {"type": "string"}
+        required.append("reasoning")
+    properties[result_key] = route_obj
+    required.append(result_key)
+    return {"type": "object", "additionalProperties": False,
+            "required": required, "properties": properties}
+
+
 def _call_planner_vlm(instructions: str, overlay: PILImage.Image, result_key: str,
-                      model: str, temperature: float, out_dir: str | None = None) -> tuple[dict, dict]:
+                      model: str, temperature: float, robot_names: list[str],
+                      cot: bool = False, allowed_labels: list[str] | None = None,
+                      out_dir: str | None = None) -> tuple[dict, dict]:
     """Second call: vision planner. instructions = per-task prompt, image = the overlay (only).
+
+    The reply is constrained to a strict route schema (structured outputs) so it can only be the fixed
+    {result_key:{robots...}} shape — no invented keys. When allowed_labels is given, every waypoint is
+    also restricted to that enum (free cells) so obstacle cells cannot be selected. With cot=True the
+    schema also carries a leading "reasoning" string generated before the routes.
 
     Returns (routes, usage) where usage is {input, output, total} token counts for this call.
 
-    The full system prompt and the full raw model output (the chain-of-thought reasoning trace + final
-    JSON, when present) are printed and, if out_dir is given, saved to vlm_prompt.txt / vlm_response.txt.
+    The full system prompt and the full raw model output are printed and, if out_dir is given, saved to
+    vlm_prompt.txt / vlm_response.txt.
     """
     buf = io.BytesIO()
     overlay.save(buf, format="PNG")
@@ -163,6 +223,12 @@ def _call_planner_vlm(instructions: str, overlay: PILImage.Image, result_key: st
         with open(os.path.join(out_dir, "vlm_prompt.txt"), "w") as f:
             f.write(instructions)
 
+    schema = _route_schema(result_key, robot_names, cot, allowed_labels)
+    keys = ("reasoning, " if cot else "") + f"{result_key}{{{', '.join(robot_names)}}}"
+    print(f"Structured output: enforcing schema (keys: {keys})")
+    if allowed_labels:
+        print(f"  waypoints restricted to {len(allowed_labels)} free cells (obstacle cells excluded)")
+
     client = _openai_client()
     print(f"Planning with {model}…")
     response = client.responses.create(
@@ -172,6 +238,8 @@ def _call_planner_vlm(instructions: str, overlay: PILImage.Image, result_key: st
             "content": [{"type": "input_image",
                          "image_url": f"data:image/png;base64,{map_b64}"}],
         }],
+        text={"format": {"type": "json_schema", "name": "route_plan",
+                         "strict": True, "schema": schema}},
     )
     u = getattr(response, "usage", None)
     usage = {
@@ -181,10 +249,7 @@ def _call_planner_vlm(instructions: str, overlay: PILImage.Image, result_key: st
     }
 
     raw = response.output_text.strip()
-    print("─" * 12 + " VLM full response (reasoning + output) " + "─" * 12)
-    print(raw)
-    print("─" * 64)
-    if out_dir is not None:
+    if out_dir is not None:                       # keep the exact JSON (single line) on disk
         with open(os.path.join(out_dir, "vlm_response.txt"), "w") as f:
             f.write(raw)
 
@@ -194,7 +259,18 @@ def _call_planner_vlm(instructions: str, overlay: PILImage.Image, result_key: st
     routes = result.get(result_key, {})
     if not isinstance(routes, dict):
         sys.exit(f"VLM '{result_key}' is not a dict: {routes!r}")
-    print(f"VLM analysis: {result.get('analysis', '')}")
+
+    # Readable terminal view: reflowed reasoning, then a compact per-robot route listing.
+    print("─" * 16 + " VLM response " + "─" * 16)
+    if result.get("reasoning"):
+        print("REASONING:")
+        print(_format_reasoning(str(result["reasoning"])))
+        print()
+    print(f"{result_key.upper()}:")
+    for name, labels in routes.items():
+        seq = ", ".join(map(str, labels)) if labels else "(empty — holds position)"
+        print(f"  {name} ({len(labels) if isinstance(labels, list) else '?'}): {seq}")
+    print("─" * 46)
     return routes, usage
 
 
@@ -294,38 +370,135 @@ def _path_length(world_path: list) -> float:
                for a, b in zip(world_path, world_path[1:]))
 
 
+def _draw_dashed_polyline(img: np.ndarray, pts: np.ndarray, color, thickness: int,
+                          dash: float = 18.0, phase: float = 0.0) -> None:
+    """Draw a dashed polyline through `pts` (Nx2 pixel points).
+
+    Marches along the path in small steps, drawing where (arc_length + phase) % (2*dash) < dash — equal
+    dash/gap, period 2*dash. `phase` shifts the pattern so a second robot's dashes fall in the first's
+    gaps (pass phase=i*dash), making overlapping paths show as alternating colored dashes.
+    """
+    period = 2.0 * dash
+    dist = float(phase)
+    step = 2.0
+    for a, b in zip(pts[:-1].astype(float), pts[1:].astype(float)):
+        seg = b - a
+        seglen = float(np.hypot(seg[0], seg[1]))
+        if seglen == 0.0:
+            continue
+        direction = seg / seglen
+        t = 0.0
+        while t < seglen:
+            s = min(step, seglen - t)
+            if (dist + t) % period < dash:           # inside a dash -> draw this sub-segment
+                p1 = a + direction * t
+                p2 = a + direction * (t + s)
+                cv2.line(img, (int(round(p1[0])), int(round(p1[1]))),
+                         (int(round(p2[0])), int(round(p2[1]))), color, thickness, cv2.LINE_AA)
+            t += s
+        dist += seglen
+
+
+def _draw_robot_legend(vis: np.ndarray, names: list[str], colors: list) -> None:
+    """Boxed top-left legend: each robot name in its path color on a light-gray background."""
+    if not names:
+        return
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale, lthick, pad, ygap = 1.3, 2, 12, 10
+    sizes = [cv2.getTextSize(n, font, scale, lthick)[0] for n in names]
+    row_h = max(h for _, h in sizes) + ygap
+    box_w = max(w for w, _ in sizes) + 2 * pad
+    box_h = row_h * len(names) + ygap
+    x0, y0 = 8, 8
+    cv2.rectangle(vis, (x0, y0), (x0 + box_w, y0 + box_h), (225, 225, 225), -1)   # light-gray fill
+    cv2.rectangle(vis, (x0, y0), (x0 + box_w, y0 + box_h), (170, 170, 170), 1)    # subtle border
+    for i, name in enumerate(names):
+        baseline_y = y0 + ygap + row_h * i + sizes[i][1]
+        cv2.putText(vis, name, (x0 + pad, baseline_y), font, scale, colors[i], lthick, cv2.LINE_AA)
+
+
 def _save_robot_paths(out_path: str, img_bgr: np.ndarray,
                       world_paths: dict[str, list], camera: str) -> None:
     """Draw every robot's planned trajectory on the clean overhead image in one figure.
 
     Each path uses the SAME per-robot color as its overlay marker (map_gen._ROBOT_COLORS, assigned by
-    insertion order): a hollow circle at the start pose, a polyline through the waypoints, and a filled
-    dot at the end, plus a small legend.
+    insertion order): a hollow circle at the start pose, a DASHED polyline through the waypoints (the
+    per-robot dash phase is staggered so overlapping paths stay both-visible as alternating colored
+    dashes), and a filled dot at the end, plus a boxed legend.
     """
     vis = img_bgr.copy()
-    font = cv2.FONT_HERSHEY_SIMPLEX
+    dash = 18.0
+    colors = []
     for i, (name, world_path) in enumerate(world_paths.items()):
         rgb = _ROBOT_COLORS[i % len(_ROBOT_COLORS)]
         bgr = (int(rgb[2]), int(rgb[1]), int(rgb[0]))
+        colors.append(bgr)
         pts = np.array([[int(round(u)), int(round(v))]
                         for u, v in (world_to_pixel(x, y, camera) for x, y in world_path)],
                        dtype=np.int32)
-        cv2.polylines(vis, [pts], isClosed=False, color=bgr, thickness=3, lineType=cv2.LINE_AA)
-        cv2.circle(vis, tuple(pts[0]), _ROBOT_RADIUS, bgr, 3, lineType=cv2.LINE_AA)   # start: hollow
-        cv2.circle(vis, tuple(pts[-1]), 8, bgr, -1, lineType=cv2.LINE_AA)             # end: filled
-        cv2.putText(vis, name, (12, 34 + i * 34), font, 1.0, bgr, 2, cv2.LINE_AA)
+        _draw_dashed_polyline(vis, pts, bgr, thickness=6, dash=dash, phase=i * dash)
+        cv2.circle(vis, tuple(pts[0]), _ROBOT_RADIUS, bgr, 4, lineType=cv2.LINE_AA)   # start: hollow
+        cv2.circle(vis, tuple(pts[-1]), 9, bgr, -1, lineType=cv2.LINE_AA)             # end: filled
+
+    _draw_robot_legend(vis, list(world_paths), colors)
+    cv2.imwrite(out_path, vis)
+
+
+def _save_paths_with_waypoints(out_path: str, img_bgr: np.ndarray,
+                               world_paths: dict[str, list], routes: dict[str, list],
+                               grid_px: dict, camera: str) -> None:
+    """Combined figure: each robot's planned A* trajectory AND its raw VLM-selected waypoints on the
+    clean overhead image, in the robot's color (sibling to robot_paths.png).
+
+    Per robot (same color assignment as _save_robot_paths, so colors match robot_paths.png): a staggered
+    DASHED polyline for the planned path with a hollow start circle, plus each VLM-chosen grid label
+    drawn as a filled dot with its label text (light-gray backed) at that label's pixel center. Only
+    robots that produced a planned path are shown; their waypoints come from `routes`.
+    """
+    vis = img_bgr.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    dash = 18.0
+    names = list(world_paths)
+    colors = []
+    for i, name in enumerate(names):
+        rgb = _ROBOT_COLORS[i % len(_ROBOT_COLORS)]
+        bgr = (int(rgb[2]), int(rgb[1]), int(rgb[0]))
+        colors.append(bgr)
+
+        pts = np.array([[int(round(u)), int(round(v))]
+                        for u, v in (world_to_pixel(x, y, camera) for x, y in world_paths[name])],
+                       dtype=np.int32)
+        _draw_dashed_polyline(vis, pts, bgr, thickness=6, dash=dash, phase=i * dash)
+        cv2.circle(vis, tuple(pts[0]), _ROBOT_RADIUS, bgr, 4, lineType=cv2.LINE_AA)   # start: hollow
+
+        # VLM-selected waypoints: a blue filled dot + large label text at each chosen label's center.
+        blue = (255, 0, 0)   # BGR
+        lbl_scale, lbl_thick = 1.3, 3
+        for lbl in routes.get(name, []):
+            uv = grid_px.get(lbl)
+            if uv is None:
+                continue
+            u, v = int(round(uv[0])), int(round(uv[1]))
+            cv2.circle(vis, (u, v), 8, blue, -1, lineType=cv2.LINE_AA)
+            tx, ty = u + 13, v - 8
+            (tw, th), base = cv2.getTextSize(str(lbl), font, lbl_scale, lbl_thick)
+            cv2.rectangle(vis, (tx - 3, ty - th - 3), (tx + tw + 3, ty + base), (225, 225, 225), -1)
+            cv2.putText(vis, str(lbl), (tx, ty), font, lbl_scale, bgr, lbl_thick, cv2.LINE_AA)
+
+    _draw_robot_legend(vis, names, colors)
     cv2.imwrite(out_path, vis)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--planner", required=True, choices=list(CONTROLLERS),
-                        help="Controller / low-level planner (required). Chosen explicitly; the "
-                             "classifier is kept in-code but not used here for now.")
-    parser.add_argument("--map-overlay", required=True, dest="map_overlay",
-                        choices=list(MAP_OVERLAY_TYPES),
-                        help="Overlay style rendered + described in the prompt (required).")
+    parser.add_argument("--planner", choices=list(CONTROLLERS), default=None,
+                        help="Controller / low-level planner. If omitted, the classifier LLM chooses it "
+                             "from the prompt.")
+    parser.add_argument("--map-overlay", dest="map_overlay", choices=list(MAP_OVERLAY_TYPES),
+                        default=None,
+                        help="Overlay style rendered + described in the prompt. If omitted, defaults to "
+                             "marked_obs for every controller.")
     parser.add_argument("--prompt", required=True,
                         help="Operator instruction for the VLM (required in every mode)")
     parser.add_argument("--data", default="test_data",
@@ -338,8 +511,9 @@ def main() -> None:
                         help="OpenAI model for the classifier + planner calls (default: gpt-4o)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="VLM sampling temperature; 0=deterministic (default: 0.0)")
-    parser.add_argument("--cot", action="store_true",
-                        help="Append the generic chain-of-thought reasoning scaffold to the prompt.")
+    parser.add_argument("--cot", action=argparse.BooleanOptionalAction, default=True,
+                        help="Append the controller's chain-of-thought scaffold (--cot / --no-cot). "
+                             "Default: on.")
     args = parser.parse_args()
 
     camera = args.camera
@@ -377,12 +551,20 @@ def main() -> None:
     grid, meta = mask_to_occupancy(pix_labels, _RESOLUTION, camera=camera)
     print(f"Occupancy grid: {meta['width']}×{meta['height']} cells @ {meta['resolution']} m/cell")
 
-    # ── Controller (planner) chosen explicitly via --planner ──────────────
-    task_type = args.planner
-    print(f"Planner (controller): {task_type}")
+    # ── Resolve controller / overlay / CoT (classifier-first, with manual overrides) ──
+    if args.planner:                       # manual controller
+        task_type = args.planner
+    else:                                  # classifier picks the controller (first LLM call)
+        task_type = _classify(args.prompt, args.model, args.temperature)
+        print(f"Classifier chose controller: {task_type}")
+
+    map_overlay = args.map_overlay or "marked_obs"   # default overlay for every controller
+    cot = args.cot                         # boolean, default True
+
     result_key, planner_name = _TASK_ROUTING[task_type]
     planner = _PLANNERS[planner_name]
-    print(f"Planner: {planner_name}  (VLM output key: '{result_key}')")
+    print(f"Controller: {task_type} | overlay: {map_overlay} | planner: {planner_name} "
+          f"(key '{result_key}') | CoT: {cot}")
 
     # ── Filtered planning context (mirrors exec.run_segmentation) ─────────
     # Edge/footprint clearing + inflation live in obs_seg.occupancy and are applied once here; the
@@ -392,16 +574,17 @@ def main() -> None:
     ctx = {"infl": infl}
 
     # ── Build the prompt + overlay image together (single source of truth) ─
-    print(f"Overlay: {args.map_overlay}   CoT: {args.cot}")
     instructions, map_b64 = generate_prompt(
-        args.prompt, task_type, args.map_overlay,
+        args.prompt, task_type, map_overlay,
         pil_img=pil_rgba, occ_grid=infl, occ_meta=meta, camera=camera,
-        robot_poses=robot_poses_ned, cot=args.cot)
+        robot_poses=robot_poses_ned, cot=cot)
     overlay = PILImage.open(io.BytesIO(base64.b64decode(map_b64))).convert("RGBA")
     overlay.convert("RGB").save(os.path.join(args.out, "vlm_overlay.png"))
+    # Waypoints are left unconstrained (no enum) — the schema still locks the route shape/keys, but the
+    # model may pick any label and we rely on it choosing sensibly (the planner projects picks to free
+    # cells). Pass allowed_labels=... to _call_planner_vlm to re-enable the free-cell enum.
     routes, usage = _call_planner_vlm(instructions, overlay, result_key, args.model, args.temperature,
-                                      out_dir=args.out)
-    print(f"VLM routes: {routes}")
+                                      list(robot_world_xy), cot=cot, out_dir=args.out)
 
     # ── Grid CSV (shared across robots) ───────────────────────────────────
     csv_path = _CONFIG_DIR / "grid_cell_centers.csv"
@@ -465,8 +648,14 @@ def main() -> None:
         _save_robot_paths(paths_png, img_bgr, world_paths, camera)
         print(f"Combined robot paths -> {paths_png}")
 
+        wp_png = os.path.join(args.out, "robot_paths_waypoints.png")
+        _save_paths_with_waypoints(wp_png, img_bgr, world_paths, routes, grid_px, camera)
+        print(f"Combined robot paths + VLM waypoints -> {wp_png}")
+
     # ── Evaluation summary ────────────────────────────────────────────────
     print("─" * 27 + " Evaluation " + "─" * 27)
+    print(f"Controller: {task_type}"
+          + ("  (classifier-chosen)" if args.planner is None else "  (manual)"))
     print(f"Tokens: {usage['total']} total "
           f"({usage['input']} input + {usage['output']} output)")
     if path_lengths:

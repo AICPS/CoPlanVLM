@@ -17,7 +17,7 @@ from coord_transform import ned_to_world_pose, yaw_from_quaternion, wrap_to_pi
 # runtime (`ros2 param set ...`) without editing this file.
 DEFAULT_MAX_LINEAR_VEL = 0.15     # m/s   — forward speed clamp (conservative for bring-up)
 DEFAULT_MAX_ANGULAR_VEL = 0.3    # rad/s — turn-rate clamp (conservative for bring-up)
-DEFAULT_HEADING_GATE_DEG = 30.0   # deg   — only drive forward once heading error is within this
+DEFAULT_HEADING_GATE_DEG = 45.0   # deg   — only drive forward once heading error is within this
 
 
 class ControlNode(Node):

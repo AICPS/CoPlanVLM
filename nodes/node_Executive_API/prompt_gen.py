@@ -13,7 +13,7 @@ generate_prompt composes the planner prompt from independent, swappable pieces, 
   2. MAP_OVERLAY_DESCRIPTION[overlay]      — how THIS overlay marks the map
   (image)                                  — the matching overlay image, rendered + returned as base64
   4. CONTROLLER_EXPLAIN[controller]        — what to select, output schema, example + the operator line
-  5. COT_BLOCK                             — optional generic chain-of-thought scaffold
+  5. COT_BLOCKS[controller]                — optional per-controller chain-of-thought scaffold
 
 A single ``map_overlay_type`` selects BOTH the description text (piece 2) and the map_gen renderer that
 draws the image, so the prompt and the image stay in lock-step.
@@ -113,12 +113,10 @@ not, as an A* path planner will route each robot to the goal locations. Output o
 for each robot in order — do not list intermediate steps. A robot with no task should have an empty list.
 
 OUTPUT FORMAT (exactly one JSON object):
-{"waypoints": {"raph": ["<goal_point>", ...], "donnie": ["<goal_point>", ...]},
- "analysis": "<one or two sentences describing the chosen goals>"}
+{"waypoints": {"raph": ["<goal_point>", ...], "donnie": ["<goal_point>", ...]}}
 
 Example — if the instruction is "Send raph to the chair and then the person. Have donnie stay in place.", a valid response is:
-{"waypoints": {"raph": ["C4", "H8"], "donnie": []},
- "analysis": "Raph is sent to the chair (C4) and then to the person (H8). Donnie has no task so its goal point is empty."}"""
+{"waypoints": {"raph": ["C4", "H8"], "donnie": []}}"""
 
 _MANEUVER_EXPLAIN = """\
 YOUR TASK:
@@ -128,13 +126,11 @@ avoidance corridors, formations, etc.). Step between locations that are adjacent
 a coherent path.
 
 OUTPUT FORMAT (exactly one JSON object):
-{"waypoints": {"raph": ["<point>", ...], "donnie": ["<point>", ...]},
- "analysis": "<one or two sentences explaining the chosen routes>"}
+{"waypoints": {"raph": ["<point>", ...], "donnie": ["<point>", ...]}}
 
 Example — if the instruction is "Have the robots do a loop around the chair", a valid response is:
 {"waypoints": {"raph": ["A7", "B6", "C5", "D4", "D3", "C3", "B3", "B4", "B5", "B6", "A7"],
-              "donnie": ["D3", "D4", "D5", "C5", "B5", "B4", "B3", "C3", "D2"]},
- "analysis": "Each robot traces an ordered loop of adjacent points around the chair and returns toward its start."}"""
+              "donnie": ["D3", "D4", "D5", "C5", "B5", "B4", "B3", "C3", "D2"]}}"""
 
 _COVERAGE_EXPLAIN = """\
 YOUR TASK:
@@ -145,13 +141,11 @@ return an empty list for the other. The order does not matter — a lower-level 
 most efficient patrol route.
 
 OUTPUT FORMAT (exactly one JSON object):
-{"regions": {"raph": ["<cell>", ...], "donnie": ["<cell>", ...]},
- "analysis": "<one or two sentences describing the coverage strategy>"}
+{"regions": {"raph": ["<cell>", ...], "donnie": ["<cell>", ...]}}
 
 Example — if the instruction is "Have the robots patrol the left side of the map", a valid response is:
 {"regions": {"raph": ["A5", "A6", "A7", "A8", "B5", "B6", "B7", "B8", "C5", "C6", "C7", "C8", "D5", "D6", "D7", "D8", "E5", "E6", "E7", "E8"],
-             "donnie": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4", "E1", "E2", "E3", "E4"]},
- "analysis": "Columns A-E split by row: raph covers rows 5-8, donnie covers rows 1-4."}"""
+             "donnie": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4", "E1", "E2", "E3", "E4"]}}"""
 
 CONTROLLER_EXPLAIN = {
     "nav2point": _NAV2POINT_EXPLAIN,
@@ -160,19 +154,113 @@ CONTROLLER_EXPLAIN = {
 }
 
 
-# ── 5. Optional chain-of-thought scaffold (generic; controller-independent) ────
-# Minimal placeholder pending a dedicated CoT redesign. Appended verbatim when cot=True.
-COT_BLOCK = """\
-REASONING — Think through the task step by step in plain text, in this order:
-1. RELEVANT OBJECTS: Identify the objects/regions named in the operator's instruction.
-2. RED-X INVENTORY: Go through every point marked with a red X in the image, one at a time. For each,
-   write its label and describe the object you actually see at or near that location (e.g. "K4: wooden pallet",
-   "C2: cardboard box"). Note that the actual object might be next to, not directly under the mark. 
-   If you cannot tell what is there, say unknown for that label. List them all.
-3. ROBOT ASSIGNMENT: Decide each robot's assignment (both robots must be included; a robot with no task holds its
-   position).
-Do NOT use any curly braces { or } in your reasoning (they are reserved for the final JSON). After
-reasoning, output the final answer as the single JSON object described above and nothing after it."""
+# ── 5. Per-controller chain-of-thought scaffolds ───────────────────────────────
+# Appended when cot=True (selected by controller via COT_BLOCKS). The response schema carries a leading
+# "reasoning" string field generated BEFORE the route keys, so these only guide WHAT to reason about —
+# the structure (reasoning first, then the locked route object) is enforced by the structured-output
+# schema, not by this text.
+#
+# coverage is a placeholder copy of the original generic block for now, kept as a separate constant so
+# it can be reworked into its own custom reasoning later without affecting the others.
+
+_NAV2POINT_COT = """\
+CoT REASONING STEPS — Before choosing routes, work through these in the "reasoning" field, in order:
+1) Identify the objects/locations named in the operator's instruction and localize each with its grid
+   label(s) (e.g. "chair: C4", "yellow box: H8").
+2) Based off the instruction, list the alpha numeric points (e.g. B4) that the robots should travel to.
+3) For each desired point, check whether its cell is blocked (Check the the list of blocked points in the MAP_OVERLAY)): 
+   if it is blocked, list the direction the robot should be relative to the obstacle, 
+   then the nearest FREE (blue-dot) point the robot can stand on in that direction;
+   if the desired point is already free, use it as-is. Also note which robot (raph or donnie) is currently nearest to
+   that cell (e.g. "green box E8 is blocked -> travel to D6, nearest robot donnie").
+"""
+
+_COVERAGE_COT = """\
+REASONING — Before deciding the routes, work through the task in the "reasoning" field, in this order:
+1. RELEVANT OBJECTS: Identify the objects/regions named in the operator's instruction. 
+   List where they are located on the map (e.g. "chair: C4", "yellow box: H8"). 
+   List where each robot is on the map initially (e.g. "raph: A7", "donnie: D2").
+2. SELECT_REGIONS: List all regions that the robots should cover/visit.
+3. ROBOT ASSIGNMENT: Divide the regions evenly between the two robots.
+Only after this reasoning, fill in the route object with your final choice."""
+
+# Inserted into _MANEUVER_COT (step 1b) only for the marked_obs overlay, which is the only overlay that
+# draws red X marks. Omitted otherwise so the model is not asked to inventory marks that do not exist.
+_RED_MARKER_SUBSTEP = """\
+   c) Label each red marker: for every red X in the image, note its label and the object at or near it
+      (it may sit beside, not directly under, the mark); write "unknown" if unclear.
+"""
+
+# ── Previous maneuver CoT (dense adjacent-cell path). Commented out, kept for reference. ──
+# _MANEUVER_COT = """\
+# CoT REASONING STEPS — Before choosing routes, work through these in the "reasoning" field, in order:
+# 1) Identify and locate the robots and key objects in the scene.
+#    a) Robots: give raph's and donnie's current position as the labeled grid point nearest each robot
+#       in the image (e.g. "raph: A7", "donnie: D2").
+#    b) Task features: list everything the instruction requires you to perceive to carry out the task —
+#       not only goal objects, but also boundaries or lines to avoid/not cross (e.g. caution tape),
+#       regions to stay within or out of, and landmarks to go around. Give the grid label(s) each one
+#       occupies or spans (e.g. "yellow box: H8", "caution tape: E4-E7", "chair to loop: C4").
+# %RED_MARKER_STEP%
+# 2) Split the instruction into one subtask per robot, naming which robot (raph or donnie) performs each.
+#    Keep every spatial constraint and landmark named in the instruction — words like behind / around /
+#    left of / between / via and the object they refer to. Do not shorten or drop these. If only one
+#    robot is needed, write "stay" for the other.
+# 3) Describe in text the specific route each robot must follow to get to the goal.
+#    List any key intermediate locations (e.g. [by chair H4]) each robot should pass through.
+# 4) For each robot please list the final location (e.g. F3) each robot should finish at.
+# 5) List any locations (e.g. D5) each robot should avoid.
+# 6) Build each robot's final path: an ordered list of grid labels from its current position (1a),
+#    through the intermediate locations (4), to its final location (3), stepping between adjacent/nearby
+#    labels and keeping off the avoid locations (5). Put this list into the route object.
+
+_MANEUVER_COT = """\
+CoT REASONING STEPS — Before choosing routes, work through these in the "reasoning" field, in order.
+A path planner will connect your consecutive waypoints with a collision-free path, so give only the KEY
+waypoints that define the maneuver's shape — do NOT list every adjacent cell or hand-trace around
+obstacles (skipping cells is expected).
+
+1) Identify and locate the robots and key objects in the scene.
+   a) Robots: give raph's and donnie's current position as the labeled grid point nearest each robot
+      in the image (e.g. "raph: A7", "donnie: D2").
+   b) Task features: list everything the instruction requires you to perceive to carry out the task —
+      not only goal objects, but also boundaries or lines to avoid/not cross (e.g. caution tape),
+      regions to stay within or out of, and landmarks to go around. Give the grid label(s) each one
+      occupies or spans (e.g. "yellow box: H8", "caution tape: E4-E7", "chair to loop: C4").
+%RED_MARKER_STEP%
+2) Split the instruction into one subtask per robot, naming which robot (raph or donnie) performs each.
+   Keep every spatial constraint and landmark named in the instruction — words like behind / around /
+   left of / between / via and the object they refer to. Do not shorten or drop these. If only one
+   robot is needed, write "stay" for the other.
+3) Ground the spatial words in the grid (columns A->N run left-to-right, rows 1->8 top-to-bottom).
+   Turn each constraint or goal location into concrete cells: the "far side" of an object from a robot is the side
+   across the object from that robot; "between X and Y" is the cells whose column/row fall between
+   theirs; to go "around" or "behind" an object, name the free corridor cells along the required side
+   (e.g. an object spanning F3-H3 -> pass above it via F2, G2, H2)
+   (e.g. an object at B5 -> approach from right via C5, B5).
+5) For each robot, break its subtask into ordered legs, each with a short purpose, giving only the KEY
+   waypoint(s) that realize it (include its start from 1a and its final goal cell). Do NOT choose a leg
+   waypoint that is on an avoid location from step 4. For a loop or circuit around an object, give
+   waypoints on several DIFFERENT sides of it (not just the far side), so the route encircles the object
+   instead of going out and doubling back the same way:
+      leg 1 <purpose>: <label(s)>   ...   leg N <purpose>: <label(s)>
+   Example — "raph: loop around the chair at C4 and return to its start at A7":
+      leg 1 approach the chair: C5 ; leg 2 circle it via each side: D4, C3, B4, C5 ;
+      leg 3 return to start: A7
+6) Assemble each robot's route as a SHORT ordered list of the key waypoints from step 5 (start -> legs
+   -> final goal). Keep it sparse: consecutive waypoints may be far apart and the planner fills the gaps
+   collision-free. Never place a waypoint on an avoid location from step 4.
+7) Verify and fix before writing the JSON: the route starts at the robot, follows the legs in order,
+   ends at the final goal, avoids every step-4 location, and truly satisfies the spatial constraint
+   (correct side of the landmark). Then put the route into the route object using the prescribed
+   output structure."""
+
+# controller -> its chain-of-thought block. Total over CONTROLLERS (validated in generate_prompt).
+COT_BLOCKS = {
+    "nav2point": _NAV2POINT_COT,   # TODO: custom block (copy of generic for now)
+    "maneuver":  _MANEUVER_COT,
+    "coverage":  _COVERAGE_COT,    # TODO: custom block (copy of generic for now)
+}
 
 
 def _operator_line(instruction: str) -> str:
@@ -187,8 +275,9 @@ def generate_prompt(instruction, controller, map_overlay_type, *,
 
     Returns ``(prompt_text, image_b64)``. ``controller`` selects the task semantics + output schema
     (piece 4); ``map_overlay_type`` selects BOTH the overlay description (piece 2) and the map_gen
-    renderer that draws the image, so text and image always agree. ``cot=True`` appends a generic
-    chain-of-thought scaffold (piece 5).
+    renderer that draws the image, so text and image always agree. ``cot=True`` appends the
+    controller's chain-of-thought scaffold (piece 5); for maneuver the red-marker sub-step is included
+    only when ``map_overlay_type == "marked_obs"``.
 
     Render inputs: ``pil_img`` (RGBA overhead frame), the pre-inflated planning grid ``occ_grid`` +
     ``occ_meta`` (used by the points/marked_obs renderers; ignored by battleship), ``camera`` calibration
@@ -224,7 +313,13 @@ def generate_prompt(instruction, controller, map_overlay_type, *,
         _operator_line(instruction),
     ]
     if cot:
-        parts.append(COT_BLOCK)
+        cot_block = COT_BLOCKS[controller]
+        if controller == "maneuver":
+            red = _RED_MARKER_SUBSTEP if map_overlay_type == "marked_obs" else ""
+            # Strip the whole sentinel line (incl. its newline) so omitting the sub-step leaves no
+            # blank line; _RED_MARKER_SUBSTEP carries its own trailing newline when present.
+            cot_block = cot_block.replace("%RED_MARKER_STEP%\n", red)
+        parts.append(cot_block)
     return "\n\n".join(parts), image_b64
 
 
@@ -241,7 +336,8 @@ Choose exactly one task type:
   Ex 2. "Send raph to the chair and then the person. Have donnie stay in place."
 
 - "coverage": Best for tasks that involve patrolling or sweeping an area.
-  The planner selects high-level regions to cover, not a specific path.
+  The planner selects high-level regions to cover, not a specific path. A low level controller 
+  will ensure all seleected regions are visited efficiently.
   Ex 1. "Have a robot patrol the perimeter of the boxes."
   Ex 2. "Have one robot patrol the left side of the room and the other patrol the right side."
 
