@@ -82,7 +82,7 @@ class ExecutiveApiNode(Node):
         # at replan_period seconds until a new prompt arrives. Future modes (event-driven, …) add
         # their own trigger that also calls _run_plan() — the VLM call body is never duplicated.
         self.declare_parameter('replan_mode', 'static')          # "static" | "dynamic"
-        self.declare_parameter('replan_period', 120)            # seconds between dynamic replans
+        self.declare_parameter('replan_period', 120.0)          # seconds between dynamic replans
         # Camera calibration key (passed to map builders via self).
         self.declare_parameter('camera', 'gazebo')              # "gazebo" | "lab_test"
 

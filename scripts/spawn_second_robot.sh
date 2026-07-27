@@ -36,7 +36,9 @@ source ~/projects/turtle4_ws/install/setup.bash
 CM="/${NS}/controller_manager"
 
 echo "[spawn_second_robot] launching ${NS} at (x=${X}, y=${Y}, z=${Z}, yaw=${YAW})"
-ros2 launch talking-turtle turtlebot4_spawn_hat.launch.py \
+# Uses the SAME filtered spawn as robot 1 (turtlebot4_ignition.launch.py), so both robots carry
+# the stock TurtleBot 4 description with no identification hat.
+ros2 launch talking-turtle turtlebot4_spawn_filtered.launch.py \
     namespace:="${NS}" x:="${X}" y:="${Y}" z:="${Z}" yaw:="${YAW}" &
 LAUNCH_PID=$!
 

@@ -57,7 +57,7 @@ for key, default in pose_defaults.items():
         )
     )
 
-# Second robot (donnie) — blue-hatted, spawned alongside raph. Pose defaults to open
+# Second robot (donnie), spawned alongside raph. Pose defaults to open
 # floor; adjust x2/y2 if it lands on an obstacle.
 ARGUMENTS += [
     DeclareLaunchArgument('namespace2', default_value='donnie',
@@ -66,8 +66,6 @@ ARGUMENTS += [
     DeclareLaunchArgument('y2', default_value='2.96', description='y of robot 2 (table row)'),
     DeclareLaunchArgument('z2', default_value='0.25', description='z of robot 2'),
     DeclareLaunchArgument('yaw2', default_value='0.0', description='yaw of robot 2'),
-    DeclareLaunchArgument('hat_color', default_value='0 0 1 1',
-                          description='RGBA hat color of robot 2'),
 ]
 
 
@@ -92,8 +90,6 @@ def generate_launch_description():
     # render-scene rebuild crash (turtlebot4_simulator#60). Used for BOTH robots.
     robot_spawn_launch = PathJoinSubstitution(
         [pkg_talking_turtle, 'launch', 'turtlebot4_spawn_filtered.launch.py'])
-    robot_spawn_hat_launch = PathJoinSubstitution(
-        [pkg_talking_turtle, 'launch', 'turtlebot4_spawn_hat.launch.py'])
 
     ignition = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([ignition_launch]),
@@ -112,9 +108,8 @@ def generate_launch_description():
             ('yaw', LaunchConfiguration('yaw'))]
     )
 
-    # Second robot (donnie) — uses the SAME filtered spawn as raph (no hat for now).
-    # To re-enable the blue hat later, give the filtered spawn a description arg and pass
-    # turtlebot4_hat.urdf.xacro (+ hat_color) here; see the deferred notes in the plan.
+    # Second robot (donnie) — uses the SAME filtered spawn as raph, so both robots carry the
+    # stock TurtleBot 4 description with no identification hat.
     robot2_spawn = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([robot_spawn_launch]),
         launch_arguments=[

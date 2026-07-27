@@ -28,7 +28,6 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config/', ['config/.env', 'config/grid_cell_centers.csv', 'config/transparent_grid.png']),
         (f'share/{package_name}/launch', files_only('launch/*.py')),
-        (f'share/{package_name}/urdf', files_only('urdf/*')),
         (f'share/{package_name}/scripts', files_only('scripts/*')),
         (f'share/{package_name}/world', ['world/house.sdf', 'world/sim_world.sdf']),
         (f'share/{package_name}/world/materials/script', glob('world/materials/script/*')),
