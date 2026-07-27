@@ -46,8 +46,8 @@ from obs_seg import FREE, OCCUPIED, UNKNOWN
 # Occupancy snapshot written by exec (map_gen.run_segmentation): pre-inflated planning grid plus the
 # raw grid / pixel labels / meta for debug. Read here instead of rebuilding or re-inflating.
 _OCC_FILE = os.path.normpath(os.path.join(
-    get_package_share_directory('talking-turtle'), '..', '..', '..', '..',
-    'debug', 'talking_turtle_occupancy.npz'))
+    get_package_share_directory('coplan_vlm'), '..', '..', '..', '..',
+    'debug', 'coplan_vlm_occupancy.npz'))
 
 from . import astar_proj, coverage_proj
 from .astar_proj import PARAMS as ASTAR_PARAMS
@@ -111,7 +111,7 @@ class SimplePathTranslator(Node):
         if self.save_debug and self.debug_dir:
             os.makedirs(self.debug_dir, exist_ok=True)
             try:
-                gpath = os.path.join(get_package_share_directory("talking-turtle"),
+                gpath = os.path.join(get_package_share_directory("coplan_vlm"),
                                      "config", "transparent_grid.png")
                 self._grid_overlay = cv2.imread(gpath, cv2.IMREAD_UNCHANGED)  # BGRA
             except Exception as exc:  # noqa: BLE001

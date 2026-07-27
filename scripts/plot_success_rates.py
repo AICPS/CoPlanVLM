@@ -6,8 +6,8 @@ FLUSH (touching) bars — our method and the SoTA baseline — in different colo
 0-100%.
 
 Usage:
-    python3 src/VLM_mission_planning/scripts/plot_success_rates.py
-    python3 src/VLM_mission_planning/scripts/plot_success_rates.py --out debug/success_rates.png
+    python3 src/CoPlanVLM/scripts/plot_success_rates.py
+    python3 src/CoPlanVLM/scripts/plot_success_rates.py --out debug/success_rates.png
 """
 from __future__ import annotations
 

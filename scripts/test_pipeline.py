@@ -13,11 +13,11 @@ By default the classifier LLM chooses the controller from the prompt, and the ov
 
 Usage (from workspace root):
     # Classifier-first (default): only the prompt is required.
-    python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
+    python3 src/CoPlanVLM/scripts/test_pipeline.py \\
         --prompt "Have raph loop around the chair and return to its start"
 
     # Fully manual: pin the controller and overlay explicitly.
-    python3 src/VLM_mission_planning/scripts/test_pipeline.py \\
+    python3 src/CoPlanVLM/scripts/test_pipeline.py \\
         --planner nav2point --map-overlay points --no-cot \\
         --prompt "Send raph to the chair and donnie to the table"
 

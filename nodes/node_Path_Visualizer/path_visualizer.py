@@ -89,7 +89,7 @@ class PathVisualizer(Node):
         self.dist_coeffs: Optional[np.ndarray] = None
 
         self.overlay_path = (
-            Path(get_package_share_directory("talking-turtle")) / "path_overlay.png"
+            Path(get_package_share_directory("coplan_vlm")) / "path_overlay.png"
         )
 
         # /vlm_plan ({planner, routes} wrapper, or a bare {robot: [labels]} dict) + shared camera

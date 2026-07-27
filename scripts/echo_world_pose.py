@@ -10,7 +10,7 @@ through the SAME coord_transform functions the stack uses, and:
     (ned_to_world is unit-preserving, so any scale mismatch is in world_to_pixel calibration).
 
 Run standalone (no rebuild):
-    python3 src/talking_turtle/scripts/echo_world_pose.py --ros-args -p robot:=donnie
+    python3 src/CoPlanVLM/scripts/echo_world_pose.py --ros-args -p robot:=donnie
 Then in another terminal:
     ros2 topic echo /donnie/world/pose_stamped
 """

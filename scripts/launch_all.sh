@@ -36,7 +36,7 @@ sweep_sim_procs() {
     pkill -9 -f "ros_gz_sim/create"                 2>/dev/null
     pkill -9 -f "ros_gz_bridge/parameter_bridge"    2>/dev/null
     pkill -9 -f "turtlebot4"                        2>/dev/null
-    pkill -9 -f "talking-turtle"                    2>/dev/null
+    pkill -9 -f "coplan_vlm"                    2>/dev/null
     pkill -9 -f "spawner.*raph"                     2>/dev/null  # orphaned controller spawners
 }
 
@@ -62,7 +62,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[launch_all] starting world + raph (turtlebot4_ignition.launch.py)"
-ros2 launch talking-turtle turtlebot4_ignition.launch.py &
+ros2 launch coplan_vlm turtlebot4_ignition.launch.py &
 IGNITION_PID=$!
 
 echo "[launch_all] waiting ${IGNITION_DELAY}s for the world + raph to come up..."

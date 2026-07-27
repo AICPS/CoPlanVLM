@@ -5,8 +5,8 @@ Run once with the Gazebo sim up to create test_data/ for offline pipeline testin
 The saved files are then used by test_pipeline.py without needing a running sim.
 
 Usage (from workspace root, after 'source install/setup.bash'):
-    python3 src/VLM_mission_planning/scripts/save_overhead.py
-    python3 src/VLM_mission_planning/scripts/save_overhead.py --out test_data --robots raph donnie
+    python3 src/CoPlanVLM/scripts/save_overhead.py
+    python3 src/CoPlanVLM/scripts/save_overhead.py --out test_data --robots raph donnie
 
 Output:
     <out>/overhead.png   — BGR image from /ids_overhead/image (typically 1936x1216)

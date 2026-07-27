@@ -6,12 +6,12 @@ saved overhead image and writes both PNGs to debug/test_map_gen/ for side-by-sid
 inspection.  No ROS nodes or simulation required.
 
 Prerequisites:
-    colcon build --symlink-install --packages-select talking-turtle
+    colcon build --symlink-install --packages-select coplan_vlm
     source install/setup.bash
 
 Usage (from workspace root):
-    python3 src/VLM_mission_planning/scripts/test_map_gen.py
-    python3 src/VLM_mission_planning/scripts/test_map_gen.py --camera lab_test
+    python3 src/CoPlanVLM/scripts/test_map_gen.py
+    python3 src/CoPlanVLM/scripts/test_map_gen.py --camera lab_test
 
 Output (debug/test_map_gen/):
     battleship.png  — overhead image composited with the transparent grid overlay
@@ -36,7 +36,7 @@ from node_Executive_API.map_gen import (render_battleship_map, render_grid_point
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PKG_DIR    = _SCRIPT_DIR.parent
-_WS_DIR     = _PKG_DIR.parent.parent   # src/VLM_mission_planning -> src -> workspace root
+_WS_DIR     = _PKG_DIR.parent.parent   # src/CoPlanVLM -> src -> workspace root
 _IMAGE      = _PKG_DIR / "overhead.png"
 _POSES_FILE = _WS_DIR / "test_data" / "poses.json"
 _OUT_DIR    = _WS_DIR / "debug" / "test_map_gen"   # workspace-root debug/, not inside the package

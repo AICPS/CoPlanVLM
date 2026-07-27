@@ -72,24 +72,24 @@ ARGUMENTS += [
 def generate_launch_description():
     
     # Directories
-    pkg_talking_turtle = get_package_share_directory('talking-turtle')
+    pkg_coplan_vlm = get_package_share_directory('coplan_vlm')
 
     ign_gazebo_resource_path = SetEnvironmentVariable(
         name='IGN_GAZEBO_RESOURCE_PATH',
         value=[
-            PathJoinSubstitution([pkg_talking_turtle, 'world']),
+            PathJoinSubstitution([pkg_coplan_vlm, 'world']),
             ':',
             os.environ.get('IGN_GAZEBO_RESOURCE_PATH', '')
         ]
     )
     # Paths
     ignition_launch = PathJoinSubstitution(
-        [pkg_talking_turtle, 'launch', 'ignition.launch.py'])
+        [pkg_coplan_vlm, 'launch', 'ignition.launch.py'])
     # Filtered spawn: strips the world-singleton Sensors/Contact plugins from each robot's
     # description (they now live in sim_world.sdf) so a 2nd robot can spawn without the
     # render-scene rebuild crash (turtlebot4_simulator#60). Used for BOTH robots.
     robot_spawn_launch = PathJoinSubstitution(
-        [pkg_talking_turtle, 'launch', 'turtlebot4_spawn_filtered.launch.py'])
+        [pkg_coplan_vlm, 'launch', 'turtlebot4_spawn_filtered.launch.py'])
 
     ignition = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([ignition_launch]),

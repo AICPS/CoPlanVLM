@@ -31,5 +31,6 @@ echo "  ${PROMPT}"
 ros2 topic pub --once "${TOPIC}" std_msgs/msg/String "{data: '${ESCAPED}'}"
 
 echo "Sent. Watch results with:"
-echo "  ros2 topic echo /grid_path     # per-robot grid plan"
-echo "  ros2 topic echo /nav/status    # success / analysis / error reason"
+echo "  ros2 topic echo /vlm_plan             # VLM plan: {planner, routes{robot: [labels]}}"
+echo "  ros2 topic echo /raph/waypoint_path   # metric waypoints after path planning"
+echo "  ros2 topic echo /raph/cmd_vel         # velocity commands to the base"

@@ -43,7 +43,7 @@ ARGUMENTS = [
 def generate_launch_description():
 
     # Directories
-    pkg_talking_turtle = get_package_share_directory('talking-turtle')
+    pkg_coplan_vlm = get_package_share_directory('coplan_vlm')
     pkg_turtlebot4_ignition_bringup = get_package_share_directory(
         'turtlebot4_ignition_bringup')
     pkg_turtlebot4_ignition_gui_plugins = get_package_share_directory(
@@ -63,7 +63,7 @@ def generate_launch_description():
     ign_resource_path = SetEnvironmentVariable(
         name='IGN_GAZEBO_RESOURCE_PATH',
         value=[
-            os.path.join(pkg_talking_turtle, 'world'), ':' +
+            os.path.join(pkg_coplan_vlm, 'world'), ':' +
             os.path.join(pkg_turtlebot4_ignition_bringup, 'worlds'), ':' +
             os.path.join(pkg_irobot_create_ignition_bringup, 'worlds'), ':' +
             str(Path(pkg_turtlebot4_description).parent.resolve()), ':' +

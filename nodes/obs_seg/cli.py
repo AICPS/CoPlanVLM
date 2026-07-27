@@ -12,7 +12,7 @@ library.
 
 Run (after building + sourcing the workspace, or from the nodes/ dir):
     python3 -m obs_seg.cli overhead.png
-    ros2 run talking-turtle obs_seg_cli overhead.png --threshold 0.45
+    ros2 run coplan_vlm obs_seg_cli overhead.png --threshold 0.45
 
     python3 -m obs_seg.cli overhead.png \
         --traversable "the floor" --obstacle "a brick wall" "a box" --threshold 0.45

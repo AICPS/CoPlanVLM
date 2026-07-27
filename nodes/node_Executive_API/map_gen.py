@@ -34,11 +34,11 @@ from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
 # exec writes the occupancy snapshot here; translate reads it instead of running CLIPSeg or
 # rebuilding/inflating the grid itself. The .npz bundles the raw pixel labels (for debug), the raw
 # metric occupancy grid (for debug), the INFLATED planning grid, and the grid meta.
-# get_package_share_directory returns <ws>/install/talking-turtle/share/talking-turtle/;
+# get_package_share_directory returns <ws>/install/coplan_vlm/share/coplan_vlm/;
 # 4 levels up is the colcon workspace root (standard isolated-install layout).
 _OCC_FILE = os.path.normpath(os.path.join(
-    get_package_share_directory('talking-turtle'), '..', '..', '..', '..',
-    'debug', 'talking_turtle_occupancy.npz'))
+    get_package_share_directory('coplan_vlm'), '..', '..', '..', '..',
+    'debug', 'coplan_vlm_occupancy.npz'))
 
 # ── Grid / set-of-marks tuning ────────────────────────────────────────────────
 _N_COLS        = 14
@@ -78,7 +78,7 @@ def _get_segmenter():
 @lru_cache(maxsize=1)
 def _load_grid_centers() -> list[tuple[str, float, float]]:
     """Return [(label, u, v), ...] pixel coords from grid_cell_centers.csv (cached, read once)."""
-    pkg_dir = get_package_share_directory('talking-turtle')
+    pkg_dir = get_package_share_directory('coplan_vlm')
     csv_path = os.path.join(pkg_dir, 'config', 'grid_cell_centers.csv')
     with open(csv_path, newline='') as f:
         return [(r['cell'], float(r['center_x']), float(r['center_y']))

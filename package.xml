@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>talking-turtle</name>
+  <name>coplan_vlm</name>
   <version>0.0.0</version>
   <description>TurtleBot control w/ OpenAI API (adaptive Executive path planner)</description>
   <maintainer email="davidrm3@uci.edu">David</maintainer>

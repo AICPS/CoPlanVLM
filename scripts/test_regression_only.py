@@ -12,11 +12,11 @@ test_pipeline / test_battleship_baseline (imported), so the only differences are
 custom single-call prompt, and using the VLM's raw pixels (not grid-cell centroids) as reference points.
 
 Prerequisites:
-    colcon build --symlink-install --packages-select talking-turtle
+    colcon build --symlink-install --packages-select coplan_vlm
     source install/setup.bash
 
 Usage (from workspace root):
-    python3 src/VLM_mission_planning/scripts/test_regression_only.py \\
+    python3 src/CoPlanVLM/scripts/test_regression_only.py \\
         --prompt "Send raph to the chair and donnie to the box"
 
 Output (written to --out, default debug/regression_only/):

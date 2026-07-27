@@ -8,15 +8,8 @@ from dotenv import load_dotenv
 from ament_index_python.packages import get_package_share_directory
 
 
-# Real-world deployment variant of talking-turtle-4sim.launch.py.
-#
-# Identical to the sim launch EXCEPT it omits the two node_Odometry_To_Pose converters.
-# Those only existed to turn the sim's /<robot>/sim_ground_truth_pose (nav_msgs/Odometry)
-# into the /<robot>/ned/pose_stamped (PoseStamped) that control/translator/visualizer
-# consume. In the real world the MoCap system already publishes /<robot>/ned/pose_stamped
-# directly, so no conversion is needed. Everything downstream is unchanged.
 def generate_launch_description():
-    pkg_dir = str(get_package_share_directory('talking-turtle'))
+    pkg_dir = str(get_package_share_directory('coplan_vlm'))
     grid_csv_path = pkg_dir + '/config/grid_cell_centers.csv'
     # Debug artifacts dir, resolved relative to this package (a `debug/` folder at the package
     # root, alongside launch/ and config/). Same __file__-relative pattern as config/.env below.
@@ -30,7 +23,7 @@ def generate_launch_description():
     api_key = os.getenv('MY_API_KEY')
     if api_key is None:
         raise RuntimeError(f"MY_API_KEY not found in .env file at {env_path}")
-
+    
     # Define Robot's Name
     bot_name = 'raph'
     bot2_name = 'donnie'   # second robot (blue hat); stubbed control on /donnie/* topics
@@ -38,7 +31,7 @@ def generate_launch_description():
     # Executive API node, OpenAI pathing
     exec_api_node = GroupAction([
         Node(
-            package='talking-turtle',
+            package='coplan_vlm',
             executable='node_Executive_API',
             name='node_Executive_API',
             output='screen',
@@ -49,22 +42,21 @@ def generate_launch_description():
                 {'replan_mode': LaunchConfiguration('replan_mode')},
                 {'replan_period': ParameterValue(
                     LaunchConfiguration('replan_period'), value_type=float)},
-                {'camera_info_topic': '/ueye/test/camera_info'},
-                {'camera': 'lab_test'},
+                {'camera': 'gazebo'},
             ],
             remappings=[
-                ('/camera_image', '/ueye/test/image_raw'),
+                ('/camera_image', '/ids_overhead/image'),
             ],
         ),
     ])
 
     # Control node, does low level control of the robot (drive to goal, etc.).
     # Fully namespaced into raph's topics (symmetric with donnie below): the translator
-    # publishes raph's plan to /raph/waypoint_path and pose comes from the MoCap topic
-    # /raph/ned/pose_stamped (remapped onto the node's /pose_stamped input).
+    # publishes raph's plan to /raph/waypoint_path and pose comes from /raph/ned/pose_stamped
+    # (published by node_Odometry_To_Pose in sim, or by MoCap directly in the real world).
     control_node = GroupAction([
         Node(
-            package='talking-turtle',
+            package='coplan_vlm',
             executable='node_Control',
             name='node_Control',
             output='screen',
@@ -77,12 +69,27 @@ def generate_launch_description():
         ),
     ])
 
-    # --- Robot 2 (donnie): the same control node, remapped into the donnie namespace.
+    # Odometry to Pose node
+    odometry_to_pose_node = Node(
+            package='coplan_vlm',
+            executable='node_Odometry_To_Pose',
+            name='node_Odometry_To_Pose',
+            output='screen',
+            emulate_tty=True,
+            parameters=[
+                {'input_topic': '/' + bot_name + '/sim_ground_truth_pose'},
+            ],
+            remappings=[
+                ('/pose_stamped', '/' + bot_name + '/ned/pose_stamped'),
+            ],
+        )
+
+    # --- Robot 2 (donnie): the same control/odom nodes, remapped into the donnie namespace.
     # The executive now plans for both robots and the translator routes donnie's plan to
     # /donnie/waypoint_path (it can still be driven manually by publishing there directly).
     control_node_2 = GroupAction([
         Node(
-            package='talking-turtle',
+            package='coplan_vlm',
             executable='node_Control',
             name='node_Control_2',
             output='screen',
@@ -95,9 +102,23 @@ def generate_launch_description():
         ),
     ])
 
+    odometry_to_pose_node_2 = Node(
+            package='coplan_vlm',
+            executable='node_Odometry_To_Pose',
+            name='node_Odometry_To_Pose_2',
+            output='screen',
+            emulate_tty=True,
+            parameters=[
+                {'input_topic': '/' + bot2_name + '/sim_ground_truth_pose'},
+            ],
+            remappings=[
+                ('/pose_stamped', '/' + bot2_name + '/ned/pose_stamped'),
+            ],
+        )
+
     # Translator node, grid coords to MoCap coords
     path_translator_node = Node(
-        package="talking-turtle",
+        package="coplan_vlm",
         executable="node_Path_Translator",
         name="node_Path_Translator",
         output='screen',
@@ -107,11 +128,10 @@ def generate_launch_description():
             {'debug_dir': debug_dir},
             {'save_debug': True},
             {'robot_names': [bot_name, bot2_name]},
-            {'camera': 'lab_test'},   # overhead camera calibration for pixel<->world
-            {'image_topic': '/ueye/test/image_raw'},   # live overhead camera frames
+            {'camera': 'gazebo'},   # overhead camera calibration for pixel<->world
         ]
     )
-
+    
     # joy_node disabled for now — only the (now-removed) audio push-to-talk node consumed /joy,
     # and the unconditional joy_node was leaking orphaned processes.
     # joy_node = Node(
@@ -124,7 +144,7 @@ def generate_launch_description():
     # Start only when pressed button 2 on joystick
     logger_node = GroupAction([
         Node(
-            package='talking-turtle',
+            package='coplan_vlm',
             executable='node_Trajectory_Logger',
             name='node_Trajectory_Logger',
             output='screen',
@@ -134,7 +154,7 @@ def generate_launch_description():
 
     # Path visualizer node
     path_visualizer_node = Node(
-        package='talking-turtle',
+        package='coplan_vlm',
         executable='node_Path_Visualizer',
         name='node_Path_Visualizer',
         output='screen',
@@ -148,10 +168,10 @@ def generate_launch_description():
             {'world_path_color': [200, 200, 200]},  # Light gray for reference path
             {'robot_color': [255, 0, 255]},  # Magenta for robot
             {'robot_names': [bot_name, bot2_name]},
-            {'camera': 'lab_test'},   # overhead camera calibration for world<->pixel
+            {'camera': 'gazebo'},   # overhead camera calibration for world<->pixel
         ],
         remappings=[
-            ('/camera_image', '/ueye/test/image_raw'),
+            ('/camera_image', '/ids_overhead/image'),
         ],
     )
 
@@ -165,7 +185,9 @@ def generate_launch_description():
             description='Seconds between dynamic replans (used only when replan_mode:=dynamic).'),
         exec_api_node,
         control_node,
+        odometry_to_pose_node,
         control_node_2,
+        odometry_to_pose_node_2,
         path_translator_node,
         # joy_node,   # disabled — see commented joy_node definition above
         path_visualizer_node,

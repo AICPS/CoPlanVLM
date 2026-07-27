@@ -1,5 +1,5 @@
 # Based on Clearpath's turtlebot4_spawn.launch.py (Apache-2.0). Modified so robot_description
-# is built by talking-turtle's scripts/gen_robot_description.py, which runs the STOCK
+# is built by coplan_vlm's scripts/gen_robot_description.py, which runs the STOCK
 # turtlebot4.urdf.xacro and then strips the world-singleton `Sensors` + `Contact` system
 # plugins from the output. Those systems are declared once at world scope in sim_world.sdf
 # instead — the fix for the multi-robot "Visual already exists" crash (turtlebot4_simulator#60).
@@ -46,7 +46,7 @@ def generate_launch_description():
         'irobot_create_common_bringup')
     pkg_irobot_create_ignition_bringup = get_package_share_directory(
         'irobot_create_ignition_bringup')
-    pkg_talking_turtle = get_package_share_directory('talking-turtle')
+    pkg_coplan_vlm = get_package_share_directory('coplan_vlm')
 
     # Paths
     turtlebot4_ros_ign_bridge_launch = PathJoinSubstitution(
@@ -61,7 +61,7 @@ def generate_launch_description():
     turtlebot4_xacro = PathJoinSubstitution(
         [pkg_turtlebot4_description, 'urdf', 'standard', 'turtlebot4.urdf.xacro'])
     gen_script = PathJoinSubstitution(
-        [pkg_talking_turtle, 'scripts', 'gen_robot_description.py'])
+        [pkg_coplan_vlm, 'scripts', 'gen_robot_description.py'])
 
     # Parameters
     param_file_cmd = DeclareLaunchArgument(

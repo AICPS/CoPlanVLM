@@ -12,11 +12,11 @@ test_pipeline (imported), so the only differences from the main pipeline are the
 custom single-call prompt, and using battleship cell centroids as the planner's reference points.
 
 Prerequisites:
-    colcon build --symlink-install --packages-select talking-turtle
+    colcon build --symlink-install --packages-select coplan_vlm
     source install/setup.bash
 
 Usage (from workspace root):
-    python3 src/VLM_mission_planning/scripts/test_battleship_baseline.py \\
+    python3 src/CoPlanVLM/scripts/test_battleship_baseline.py \\
         --prompt "Send raph to the chair and donnie to the box"
 
 Output (written to --out, default debug/battleship_baseline/):

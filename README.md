@@ -1,4 +1,4 @@
-# Talking Turtle – LLM‑Powered Navigation Stack
+# CoPlanVLM – LLM‑Powered Navigation Stack
 
 > **Multi‑node ROS 2 workspace for natural‑language control, path‑planning, and autonomous execution in Gazebo Ignition Fortress using Turtlebot4**
 
@@ -21,7 +21,7 @@
 
 ## Introduction
 
-Talking Turtle turns high‑level human instructions into safe, interpretable robot motion.  The stack couples OpenAI GPT models with ROS 2 Humble nodes to:
+CoPlanVLM turns high‑level human instructions into safe, interpretable robot motion.  The stack couples OpenAI GPT models with ROS 2 Humble nodes to:
 
 * parse natural‑language commands,
 * plan collision‑free world‑frame paths, and
@@ -83,7 +83,7 @@ Each block may be launched stand‑alone for unit testing.
 
 | Node (exec)                                 | Purpose                                                                                  | Key Parameters                             |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------ |
-| **`talking-turtle/basic_LLM_control_node`** | One‑shot language→Twist mapper (demo)                                                    | `openai_api_key`, `temperature` (optional) |
+| **`coplan_vlm/basic_LLM_control_node`** | One‑shot language→Twist mapper (demo)                                                    | `openai_api_key`, `temperature` (optional) |
 | **`node_Triage_API`**                       | Conversational front‑end; throttles prompts while waiting on the planner                 | `chat_timeout`, `openai_api_key`           |
 | **`node_Executive_API`**                    | Sends world snapshot & operator prompt to GPT; returns `/path` list & `/nav/status` JSON | `openai_api_key`                           |
 | **`node_Path_Translator`**                  | Converts grid labels or pixel (u,v) coords to world metres and publishes `/world_path`   | `csv_file`, `origin_label`, `metres_per_pixel_x`, `metres_per_pixel_y` |
@@ -127,10 +127,10 @@ Follow the instructions in this [link](https://turtlebot.github.io/turtlebot4-us
 mkdir -p ~/ros2_ws/src && cd ~/ros2_ws
 
 # 2. clone the repo
-git clone <your-repo-url> src/talking-turtle
+git clone <your-repo-url> src/CoPlanVLM
 
 # 3. install Python deps
-python3 -m pip install -r src/talking-turtle/requirements.txt
+python3 -m pip install -r src/CoPlanVLM/requirements.txt
 
 # 4. resolve ROS 2 deps & build
 rosdep update
@@ -174,7 +174,7 @@ ros2 param dump /executive_api_node   # after startup
 Open a terminal and start the simulator first:
 
 ```bash
-ros2 launch talking-turtle turtlebot4_ignition.launch.py
+ros2 launch coplan_vlm turtlebot4_ignition.launch.py
 ```
 
 #### Set the robot namespace
@@ -190,7 +190,7 @@ Wait until the robot is spawned and you can see the TurtleBot come up with the e
 Open a second terminal and launch the planning and control stack:
 
 ```bash
-ros2 launch talking-turtle talking-turtle.launch.py openai_api_key:=$OPENAI_API_KEY
+ros2 launch coplan_vlm coplan_vlm_4sim.launch.py openai_api_key:=$OPENAI_API_KEY
 ```
 
 This starts **Triage → Executive → Translator → Controller** and binds the CLI prompt for the operator.
@@ -213,7 +213,7 @@ If you run into an image-type issue or the controller is already stuck from a pr
 Run any module on its own for unit tests, e.g.:
 
 ```bash
-ros2 run talking-turtle node_Path_Translator \
+ros2 run coplan_vlm node_Path_Translator \
   --ros-args -p csv_file:=maps/grid_lookup.csv -p pixel_sign_x:=-1 -p pixel_sign_y:=1
 ```
 

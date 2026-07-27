@@ -7,7 +7,7 @@
 # early and fails. Waiting a fixed delay after the spawn launch (so the CM is fully ready) and
 # THEN running the spawners is exactly the manual timing that reliably works.
 #
-# Prereqs: the world + robot 1 are already up (ros2 launch talking-turtle turtlebot4_ignition.launch.py).
+# Prereqs: the world + robot 1 are already up (ros2 launch coplan_vlm turtlebot4_ignition.launch.py).
 #
 # Usage:
 #   ./spawn_second_robot.sh [namespace] [x] [y] [z] [yaw]
@@ -38,7 +38,7 @@ CM="/${NS}/controller_manager"
 echo "[spawn_second_robot] launching ${NS} at (x=${X}, y=${Y}, z=${Z}, yaw=${YAW})"
 # Uses the SAME filtered spawn as robot 1 (turtlebot4_ignition.launch.py), so both robots carry
 # the stock TurtleBot 4 description with no identification hat.
-ros2 launch talking-turtle turtlebot4_spawn_filtered.launch.py \
+ros2 launch coplan_vlm turtlebot4_spawn_filtered.launch.py \
     namespace:="${NS}" x:="${X}" y:="${Y}" z:="${Z}" yaw:="${YAW}" &
 LAUNCH_PID=$!
 

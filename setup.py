@@ -2,8 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'talking-turtle'
-node_path = 'talking-turtle.nodes.'
+package_name = 'coplan_vlm'
 
 def files_only(pattern):
     """glob() that skips directories (e.g. a stray __pycache__ picked up by scripts/*)."""
@@ -49,7 +48,6 @@ setup(
             'node_Path_Visualizer = node_Path_Visualizer.path_visualizer:main',
             'node_Trajectory_Logger = node_Path_Translator.logger_node:main',
             'node_Odometry_To_Pose = node_Path_Translator.odom_to_pose:main',
-            'node_Dummy_Overhead = node_Dummy_Overhead.dummy_overhead:main',
             'obs_seg_cli = obs_seg.cli:main',
         ],
     },

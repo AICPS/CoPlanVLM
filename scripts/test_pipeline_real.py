@@ -12,16 +12,16 @@ harness; only main() is reimplemented, mirroring tp.main() with the image path, 
 source changed.
 
 Prerequisites:
-    colcon build --symlink-install --packages-select talking-turtle
+    colcon build --symlink-install --packages-select coplan_vlm
     source install/setup.bash
 
 Usage (from workspace root):
     # Classifier-first (default): only the prompt is required.
-    python3 src/VLM_mission_planning/scripts/test_pipeline_real.py \\
+    python3 src/CoPlanVLM/scripts/test_pipeline_real.py \\
         --prompt "Send raph to the chair and donnie to the table"
 
     # Fully manual: pin the controller and overlay explicitly.
-    python3 src/VLM_mission_planning/scripts/test_pipeline_real.py \\
+    python3 src/CoPlanVLM/scripts/test_pipeline_real.py \\
         --planner nav2point --map-overlay points --no-cot \\
         --prompt "Send raph to the chair and donnie to the table"
 
