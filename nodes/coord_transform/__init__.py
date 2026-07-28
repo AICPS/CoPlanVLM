@@ -27,6 +27,14 @@ import math
 # lab_test: real intrinsic calibration (camera_matrix K, 1920x1200 raw images) z=4.27 m.
 #   fx != fy here, so the pinhole scale differs per axis; the yaw/pixel maths below handle it.
 # fx=fy=1153.6187 == height / 0.008235, so gazebo reproduces the old 0.008235 m/px exactly.
+#
+# lab_test distortion (plumb_bob, from the same calibration as K above), recorded here because it
+# is otherwise only available at runtime on /ueye/test/camera_info:
+#   d = [-0.120573, 0.033817, -0.002598, 0.005927, 0.0]
+# NOT applied by this module — exec and the visualizer undistort with the live camera_info before
+# any pixel<->world call, so CAMERAS describes the UNDISTORTED image. That is consistent because
+# cv2.undistort without a newCameraMatrix preserves K, so the same fx/fy/cx/cy describe both the
+# raw and the undistorted frame.
 CAMERAS = {
     "gazebo":   {"height": 9.5, "fx": 1153.6187, "fy": 1153.6187, "cx": 968.0, "cy": 608.0},
     "lab_test": {"height": 4.27, "fx": 959.5390439489479, "fy": 948.7315120801915, "cx": 988.0379239269574, "cy": 621.2961259804192},

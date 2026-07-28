@@ -20,11 +20,11 @@ Usage (from workspace root):
         --prompt "Send raph to the chair and donnie to the box"
 
 Output (written to --out, default debug/battleship_baseline/):
-    vlm_overlay.png       — the battleship-grid image sent to the VLM
-    robot_paths.png       — both robots' planned (A*) trajectories on the clean overhead image
+    marks_overlay.png     — the battleship-grid image sent to the VLM
+    robot_paths_waypoints.png — both robots' planned (A*) trajectories + their chosen grid cells
     robot_paths_centroids.png — both robots' reference routes through the chosen cell centroids (pre-A*)
-  and per robot in <out>/<robot>/: raw_overhead, segmentation, occ_true, vlm_selections,
-    route_centroids, route_planned, occ_inflated, inflation_overlay.
+    raw_overhead.png, inflation_overlay.png — identical for every robot, so written once here
+  and per robot in <out>/<robot>/: vlm_selections, route_centroids, route_planned.
 """
 from __future__ import annotations
 
@@ -41,9 +41,11 @@ import cv2
 import numpy as np
 from PIL import Image as PILImage
 
+import debug_io
 from coord_transform import gazebo_to_world, gazebo_to_ned, ned_to_world
 from obs_seg.segmenter import TraversabilitySegmenter
-from obs_seg.occupancy import mask_to_occupancy, create_filtered_occupancy_map, RESOLUTION as _RESOLUTION
+from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
+                               render_inflation_overlay, RESOLUTION as _RESOLUTION)
 from node_Path_Translator import astar_proj
 from node_Path_Translator.astar_proj import PARAMS as ASTAR_PARAMS
 from node_Executive_API.map_gen import render_battleship_map, _N_COLS, _N_ROWS
@@ -124,24 +126,23 @@ def _adjacency_warnings(name: str, labels: list) -> None:
 
 # ── VLM call (single call; text + battleship image; plain JSON, like the baseline node) ──
 
-def _call_baseline_vlm(prompt: str, overlay: PILImage.Image, model: str, temperature: float,
+def _call_baseline_vlm(prompt: str, map_b64: str, model: str, temperature: float,
                        out_dir: str | None = None) -> tuple[dict, dict]:
     """Mirror the baseline Executive node: system instructions = BASELINE_PROMPT, user content =
     [operator prompt text, battleship overlay image]. Plain JSON reply (no structured schema).
 
+    `map_b64` is the base64 PNG of the overlay, encoded by the caller so the same bytes go to both
+    the API and debug_io.save_marks_overlay.
+
     Returns (routes, usage) where routes = {robot: [cell, ...]} and usage is token counts.
     """
-    buf = io.BytesIO()
-    overlay.save(buf, format="PNG")
-    map_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
     print("─" * 16 + " VLM full prompt (system instructions) " + "─" * 16)
     print(BASELINE_PROMPT)
     print(f'\nOperator instruction: "{prompt}"')
     print("─" * 71)
-    if out_dir is not None:
-        with open(os.path.join(out_dir, "vlm_prompt.txt"), "w") as f:
-            f.write(BASELINE_PROMPT + f'\n\nOperator instruction: "{prompt}"')
+    # This baseline sends the operator text as a separate user turn, so record it with the system
+    # instructions to keep vlm_prompt.txt a complete picture of what the model was given.
+    saved_prompt = BASELINE_PROMPT + f'\n\nOperator instruction: "{prompt}"'
 
     client = tp._openai_client()
     print(f"Planning with {model}…")
@@ -164,8 +165,7 @@ def _call_baseline_vlm(prompt: str, overlay: PILImage.Image, model: str, tempera
 
     raw = response.output_text.strip()
     if out_dir is not None:
-        with open(os.path.join(out_dir, "vlm_response.txt"), "w") as f:
-            f.write(raw)
+        debug_io.save_vlm_exchange(out_dir, saved_prompt, raw)
 
     result = tp._parse_json_reply(raw)
     if result is None:
@@ -237,13 +237,25 @@ def main() -> None:
     infl, cleared = create_filtered_occupancy_map(grid, meta, world_poses, return_cleared=True)
     ctx = {"infl": infl}
 
+    # Robot-independent debug artifacts: rendered and written ONCE per run at the top level
+    # (they are identical for every robot). `infl_overlay` is reused below as each robot's
+    # route_planned.png canvas, so render_inflation_overlay runs only this once.
+    os.makedirs(args.out, exist_ok=True)
+    infl_overlay = render_inflation_overlay(img_bgr, cleared, infl, meta, camera)
+    debug_io.save_raw_overhead(args.out, img_bgr)
+    debug_io.save_inflation_overlay(args.out, infl_overlay)
+
     # ── Battleship overlay image + cell centroids ─────────────────────────
     overlay = render_battleship_map(pil_rgba, robot_poses=robot_poses_ned, camera=camera)
-    overlay.convert("RGB").save(os.path.join(args.out, "vlm_overlay.png"))
+    # Encode once: the same bytes go to the API and to marks_overlay.png.
+    _buf = io.BytesIO()
+    overlay.save(_buf, format="PNG")
+    map_b64 = base64.b64encode(_buf.getvalue()).decode("utf-8")
+    debug_io.save_marks_overlay(args.out, map_b64)
     grid_px = _battleship_centroids(w, h)
 
     # ── Single VLM call ───────────────────────────────────────────────────
-    routes, usage = _call_baseline_vlm(args.prompt, overlay, args.model, args.temperature,
+    routes, usage = _call_baseline_vlm(args.prompt, map_b64, args.model, args.temperature,
                                        out_dir=args.out)
 
     # ── Plan per robot through battleship centroids (astar) ───────────────
@@ -290,20 +302,22 @@ def main() -> None:
 
         out_dir = os.path.join(args.out, name)
         os.makedirs(out_dir, exist_ok=True)
-        tp._save_common_debug(out_dir, img_bgr, pix_labels, grid)
-        tp._save_vlm_selections(out_dir, img_bgr, "battleship", labels, grid_px)
+        debug_io.save_vlm_selections(out_dir, img_bgr, "battleship", labels, grid_px)
         dbg["start_world"] = pose_xy
-        astar_proj.save_debug(out_dir, img_bgr, cleared, meta, ctx, dbg, params, camera=camera)
+        astar_proj.save_debug(out_dir, img_bgr, cleared, meta, ctx, dbg, params, camera=camera,
+                              overlay=infl_overlay)
         print(f"[{name}] Debug images -> {out_dir}/")
 
     # ── Combined trajectory plots ─────────────────────────────────────────
     if world_paths:
-        paths_png = os.path.join(args.out, "robot_paths.png")
-        tp._save_robot_paths(paths_png, img_bgr, world_paths, camera)
-        print(f"Combined robot paths -> {paths_png}")
+        wp_png = os.path.join(args.out, "robot_paths_waypoints.png")
+        debug_io.save_paths_with_waypoints(wp_png, img_bgr, world_paths, routes, grid_px, camera)
+        print(f"Combined robot paths + VLM cells -> {wp_png}")
     if centroid_routes:
+        # Pre-A* reference route through the chosen cell centroids — the one figure that still
+        # uses the plain trajectory renderer (there are no VLM picks to overlay on it).
         cpaths_png = os.path.join(args.out, "robot_paths_centroids.png")
-        tp._save_robot_paths(cpaths_png, img_bgr, centroid_routes, camera)
+        debug_io.save_robot_paths(cpaths_png, img_bgr, centroid_routes, camera)
         print(f"Combined centroid routes -> {cpaths_png}")
 
     # ── Evaluation summary ────────────────────────────────────────────────

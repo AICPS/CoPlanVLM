@@ -6,9 +6,9 @@ the overhead overlay best suited to that behavior via the ``render_*`` functions
 extract the live camera frame off the ``ExecutiveApiNode`` (``node.camera_image``, ``node.bridge``,
 ``node.camera_matrix``, ``node.dist_coeffs``). Static map assets are loaded and cached here.
 
-CLIPSeg lives here (not in translate.py). ``run_segmentation(node)`` is called by exec once per
+CLIPSeg lives here (not in translator_node.py). ``run_segmentation(node)`` is called by exec once per
 replan tick; it runs CLIPSeg on the current camera frame, stores ``node.pix_labels``, and writes
-the result to ``_OCC_FILE`` so that translate.py can read it instead of running its own instance.
+the result to ``_OCC_FILE`` so that translator_node.py can read it instead of running its own instance.
 This keeps the model in one process and avoids a ROS topic for the occupancy data.
 """
 
@@ -92,10 +92,15 @@ def run_segmentation(node) -> None:
 
     Called by exec._run_plan before map builder dispatch so every task type produces a fresh
     occupancy snapshot. Inflation happens HERE (once, upstream) via obs_seg.occupancy.inflate_occupancy
-    so the planner modules never inflate; translate.py reads the pre-inflated grid directly.
+    so the planner modules never inflate; translator_node.py reads the pre-inflated grid directly.
     Stores node.pix_labels (still used by the nav2point map builder) and saves an .npz bundling the
-    raw pixel labels, the raw metric grid, the inflated planning grid, and the grid meta.
+    camera frame, the raw pixel labels, the raw metric grid, the inflated planning grid, and the meta.
     No-op if no camera image is available yet.
+
+    The snapshot carries `frame_bgr` — the undistorted frame everything here was computed from — so
+    translator_node.py renders its debug figures on the SAME frame the VLM saw. Without it translate would
+    fall back to its own latest camera image, which is a good ten to forty seconds newer (classifier
+    call + CLIPSeg + planner call all happen in between) and shows the robots already moved.
     """
     if node.camera_image is None:
         return
@@ -116,10 +121,12 @@ def run_segmentation(node) -> None:
     node.occ_grid = infl
     node.occ_meta = meta
 
-    # npz: grid = raw CLIPSeg map; cleared = post-override, pre-inflation (red layer for overlays);
-    # infl = final planning grid (overrides + inflation), what the planner consumes.
+    # npz: frame_bgr = the undistorted frame all of the above was computed from (translate draws its
+    # debug figures on it); grid = raw CLIPSeg map; cleared = post-override, pre-inflation (red layer
+    # for overlays); infl = final planning grid (overrides + inflation), what the planner consumes.
     os.makedirs(os.path.dirname(_OCC_FILE), exist_ok=True)
-    np.savez(_OCC_FILE, pix_labels=pix_labels, grid=grid, cleared=cleared, infl=infl,
+    np.savez(_OCC_FILE, frame_bgr=cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+             pix_labels=pix_labels, grid=grid, cleared=cleared, infl=infl,
              resolution=meta["resolution"], origin_x=meta["origin_x"],
              origin_y=meta["origin_y"], width=meta["width"], height=meta["height"])
 

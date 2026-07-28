@@ -127,7 +127,6 @@ class PathVisualizer(Node):
         self.declare_parameter("robot_names", ["raph", "donnie"])
         self.declare_parameter("camera_image_topic", "/camera_image")
         self.declare_parameter("camera_info_topic", "/ids_overhead/camera_info")
-        self.declare_parameter("pose_topic", "/raph/sim_ground_truth_pose")
         self.declare_parameter("viz_topic", "/path_visualization")
 
         # Which overhead camera calibration to use for world<->pixel: "gazebo" (sim) or

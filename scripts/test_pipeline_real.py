@@ -30,8 +30,6 @@ Output (written to --out, default debug/offline_test_real/): same files as test_
 from __future__ import annotations
 
 import argparse
-import base64
-import io
 import os
 import sys
 
@@ -39,9 +37,11 @@ import cv2
 import numpy as np
 from PIL import Image as PILImage
 
+import debug_io
 from coord_transform import world_to_ned, ned_to_world
 from obs_seg.segmenter import TraversabilitySegmenter
-from obs_seg.occupancy import mask_to_occupancy, create_filtered_occupancy_map, RESOLUTION as _RESOLUTION
+from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
+                               render_inflation_overlay, RESOLUTION as _RESOLUTION)
 
 # Reuse ALL of test_pipeline's helpers + re-exported symbols so this stays in sync with the main harness.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -121,7 +121,7 @@ def main() -> None:
     map_overlay = args.map_overlay or "marked_obs"   # default overlay for every controller
     cot = args.cot                         # boolean, default True
 
-    result_key, planner_name = tp._TASK_ROUTING[task_type]
+    result_key, planner_name = tp.TASK_ROUTING[task_type]
     planner = tp._PLANNERS[planner_name]
     print(f"Controller: {task_type} | overlay: {map_overlay} | planner: {planner_name} "
           f"(key '{result_key}') | CoT: {cot}")
@@ -131,14 +131,22 @@ def main() -> None:
     infl, cleared = create_filtered_occupancy_map(grid, meta, world_poses, return_cleared=True)
     ctx = {"infl": infl}
 
+    # Robot-independent debug artifacts: rendered and written ONCE per run at the top level
+    # (they are identical for every robot). `infl_overlay` is reused below as each robot's
+    # route_planned.png canvas, so render_inflation_overlay runs only this once.
+    os.makedirs(args.out, exist_ok=True)
+    infl_overlay = render_inflation_overlay(img_bgr, cleared, infl, meta, camera)
+    debug_io.save_raw_overhead(args.out, img_bgr)
+    debug_io.save_inflation_overlay(args.out, infl_overlay)
+
     # ── Build the prompt + overlay image together (single source of truth) ─
     instructions, map_b64 = tp.generate_prompt(
         args.prompt, task_type, map_overlay,
         pil_img=pil_rgba, occ_grid=infl, occ_meta=meta, camera=camera,
         robot_poses=robot_poses_ned, cot=cot)
-    overlay = PILImage.open(io.BytesIO(base64.b64decode(map_b64))).convert("RGBA")
-    overlay.convert("RGB").save(os.path.join(args.out, "vlm_overlay.png"))
-    routes, usage = tp._call_planner_vlm(instructions, overlay, result_key, args.model, args.temperature,
+    # Byte-exact copy of the image sent to the VLM (no decode/re-encode).
+    debug_io.save_marks_overlay(args.out, map_b64)
+    routes, usage = tp._call_planner_vlm(instructions, map_b64, result_key, args.model, args.temperature,
                                          list(robot_world_xy), cot=cot, out_dir=args.out)
 
     # ── Grid CSV (shared across robots) ───────────────────────────────────
@@ -188,20 +196,16 @@ def main() -> None:
 
         out_dir = os.path.join(args.out, name)
         os.makedirs(out_dir, exist_ok=True)
-        tp._save_common_debug(out_dir, img_bgr, pix_labels, grid)
-        tp._save_vlm_selections(out_dir, img_bgr, args.map_overlay, labels, grid_px)
+        debug_io.save_vlm_selections(out_dir, img_bgr, map_overlay, labels, grid_px)
         dbg["start_world"] = pose_xy
-        planner.save_debug(out_dir, img_bgr, cleared, meta, ctx, dbg, params, camera=camera)
+        planner.save_debug(out_dir, img_bgr, cleared, meta, ctx, dbg, params, camera=camera,
+                           overlay=infl_overlay)
         print(f"[{name}] Debug images -> {out_dir}/")
 
-    # ── Combined trajectory plots (both robots on the clean overhead image) ─
+    # ── Combined trajectory plot (both robots on the clean overhead image) ─
     if world_paths:
-        paths_png = os.path.join(args.out, "robot_paths.png")
-        tp._save_robot_paths(paths_png, img_bgr, world_paths, camera)
-        print(f"Combined robot paths -> {paths_png}")
-
         wp_png = os.path.join(args.out, "robot_paths_waypoints.png")
-        tp._save_paths_with_waypoints(wp_png, img_bgr, world_paths, routes, grid_px, camera)
+        debug_io.save_paths_with_waypoints(wp_png, img_bgr, world_paths, routes, grid_px, camera)
         print(f"Combined robot paths + VLM waypoints -> {wp_png}")
 
     # ── Evaluation summary ────────────────────────────────────────────────

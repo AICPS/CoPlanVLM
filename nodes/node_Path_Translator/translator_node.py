@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-simple_path_translator.py — ROS 2 entry point for label -> metric path planning.
+translator_node.py — ROS 2 entry point for label -> metric path planning.
 
 Subscribes to `/vlm_plan`, a JSON wrapper naming the planner and the per-robot label lists:
 
     {"planner": "astar" | "coverage", "routes": {robot_name: [labels]}}
 
 (A bare {robot_name: [labels]} object is also accepted and defaults to the astar planner.) The node
-reads the pre-inflated occupancy snapshot exec wrote to _OCC_FILE, turns each robot's labels into a
-world-frame reference route (robot pose prepended), and DELEGATES the path computation to the named
-planner module:
+reads the occupancy snapshot exec wrote to _OCC_FILE — the pre-inflated grid plus the camera frame it
+was computed from — turns each robot's labels into a world-frame reference route (robot pose
+prepended), and DELEGATES the path computation to the named planner module:
 
     astar    -> astar_proj    : project-to-free + pairwise A* + LOS thinning (ordered waypoints)
     coverage -> coverage_proj : project-to-free + open-TSP ordering + A* stitching (region sweep)
@@ -17,7 +17,7 @@ planner module:
 Each planner exposes build_reference(...) / plan(reference_xy, ctx, meta, params) / save_debug(...).
 Inflation is done once upstream (exec.run_segmentation), so this node never inflates — it just wraps
 the inflated grid as ctx = {"infl": infl}. This node keeps everything ROS-specific (I/O, pose
-caching, the shared occupancy/segmentation debug images) and stays thin; the algorithms live in the
+caching; debug artifacts go through the shared debug_io writer) and stays thin; the algorithms live in the
 planner modules. Each robot's result is published as a Float32MultiArray [x1,y1,x2,y2,...] on
 /<robot>/waypoint_path.
 """
@@ -29,19 +29,20 @@ import os
 from pathlib import Path
 from typing import Dict, List
 
-import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String, Float32MultiArray
-from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
-from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 
+import debug_io
 from coord_transform import ned_to_world
-from obs_seg import FREE, OCCUPIED, UNKNOWN
+from obs_seg.occupancy import render_inflation_overlay
+# Which overlay the VLM saw — needed so vlm_selections.png is drawn in the matching style.
+# /vlm_plan does not carry it, so both nodes read it from the shared prompt_gen constant.
+from node_Executive_API.prompt_gen import PRODUCTION_MAP_OVERLAY
 
 # Occupancy snapshot written by exec (map_gen.run_segmentation): pre-inflated planning grid plus the
 # raw grid / pixel labels / meta for debug. Read here instead of rebuilding or re-inflating.
@@ -79,7 +80,6 @@ class SimplePathTranslator(Node):
         # ─── Obstacle-aware planning params ───────────────────────────────────
         # Resolution is NOT a param here: it travels in the occupancy snapshot's meta (written by
         # exec) and is read from there per message, so translate never needs its own copy.
-        self.declare_parameter("image_topic", "/ids_overhead/image")
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
 
@@ -97,7 +97,6 @@ class SimplePathTranslator(Node):
         self.robot_names = list(self.get_parameter("robot_names").value)
 
         self.camera_name: str = self.get_parameter("camera").get_parameter_value().string_value
-        self.image_topic = self.get_parameter("image_topic").value
 
         self.save_debug = self.get_parameter("save_debug").value
         self.debug_dir = self.get_parameter("debug_dir").value
@@ -106,16 +105,13 @@ class SimplePathTranslator(Node):
         # plan()/save_debug(). The planner module itself is selected per message in _on_path_msg.
         self.plan_params = {k: self.get_parameter(k).value for k in {**ASTAR_PARAMS, **COVERAGE_PARAMS}}
 
-        # ─── Debug grid overlay (shared) ──────────────────────────────────────
-        self._grid_overlay = None
+        # ─── Debug output dir ─────────────────────────────────────────────────
+        # The overlay the VLM actually saw is written by exec (marks_overlay.png) — it is the node
+        # that renders it. This node writes the frame, the occupancy view and the route figures, all
+        # on the frame exec bundled into the occupancy snapshot, so every figure of one plan shows
+        # the same instant as marks_overlay.png.
         if self.save_debug and self.debug_dir:
             os.makedirs(self.debug_dir, exist_ok=True)
-            try:
-                gpath = os.path.join(get_package_share_directory("coplan_vlm"),
-                                     "config", "transparent_grid.png")
-                self._grid_overlay = cv2.imread(gpath, cv2.IMREAD_UNCHANGED)  # BGRA
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(f"Could not load grid overlay for debug: {exc}")
             self.get_logger().info(f"Debug artifacts -> {self.debug_dir}")
         elif self.save_debug:
             self.get_logger().warn("save_debug=true but debug_dir empty; debug saving disabled.")
@@ -125,12 +121,11 @@ class SimplePathTranslator(Node):
         # lives in coord_transform).
         self.grid_px: Dict[str, np.ndarray] = self._load_grid_csv(grid_csv)
 
-        # ─── Overhead image (still subscribed for debug saves) ─────────────────
-        self.bridge = CvBridge()
-        self.latest_rgb = None
-
         # ─── ROS 2 I/O ────────────────────────────────────────────────────────
-        self.create_subscription(Image, self.image_topic, self._on_image, 1)
+        # No overhead-image subscription: debug figures are drawn on the frame exec bundles into the
+        # occupancy snapshot, so they are guaranteed to show the instant the VLM saw. Subscribing
+        # here would only re-stream full-resolution frames over the network to duplicate a picture
+        # this node already has on disk — and an unsynchronised, un-undistorted one at that.
         self.sub = self.create_subscription(String, vlm_plan_topic, self._on_path_msg, 10)
         self.world_pubs: Dict[str, object] = {
             name: self.create_publisher(Float32MultiArray, f"/{name}/waypoint_path", 10)
@@ -156,12 +151,22 @@ class SimplePathTranslator(Node):
         return _cb
 
     # ------------------------------------------------------------------
-    def _on_image(self, msg: Image) -> None:
-        """Cache the latest overhead frame (RGB) for on-demand costmap building."""
-        try:
-            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f"Failed to decode overhead image: {exc}")
+    def _snapshot_frame(self, snap) -> np.ndarray | None:
+        """Return the BGR frame every debug figure of this plan is drawn on, or None if absent.
+
+        The frame comes from exec's occupancy snapshot and nowhere else: it is the undistorted image
+        the segmentation, the inflated grid and exec's marks_overlay.png all describe, so every
+        artifact of one plan shows a single instant. exec writes it in run_segmentation before
+        publishing /vlm_plan, so a snapshot reached from _on_path_msg always carries it; None means
+        an exec too old to write it, and the plan is executed with no debug figures rather than with
+        misleading ones.
+        """
+        if "frame_bgr" not in snap.files:
+            self.get_logger().warn(
+                "Occupancy snapshot has no frame_bgr (exec too old?) — skipping debug figures for "
+                "this plan; planning and publishing are unaffected.")
+            return None
+        return np.ascontiguousarray(snap["frame_bgr"])
 
     # ------------------------------------------------------------------
     def _load_grid_csv(self, csv_path: str) -> Dict[str, np.ndarray]:
@@ -246,10 +251,6 @@ class SimplePathTranslator(Node):
                 f"Unknown planner '{planner_name}' in /vlm_plan; skipping.")
             return
 
-        if self.latest_rgb is None:
-            self.get_logger().warn("No overhead image received yet — cannot plan. Skipping.")
-            return
-
         # Read the pre-inflated occupancy snapshot written by exec (map_gen.run_segmentation). exec
         # runs CLIPSeg and inflates once; translate consumes the shared file so neither step repeats.
         if not os.path.exists(_OCC_FILE):
@@ -257,7 +258,8 @@ class SimplePathTranslator(Node):
                 "Occupancy file not found — has exec published a plan yet? Skipping.")
             return
         snap = np.load(_OCC_FILE)
-        pix_labels = snap["pix_labels"]
+        # snap also carries "pix_labels" (raw CLIPSeg output); nothing here consumes it since the
+        # segmentation PNG was dropped — map_gen still bundles it for offline inspection.
         grid = snap["grid"]
         # Post-override, pre-inflation grid — the red layer for the inflation overlay. Fall back to the
         # raw grid for older snapshots that predate the `cleared` key.
@@ -266,6 +268,27 @@ class SimplePathTranslator(Node):
                 "origin_x": float(snap["origin_x"]), "origin_y": float(snap["origin_y"]),
                 "width": int(snap["width"]), "height": int(snap["height"])}
         ctx = {"infl": snap["infl"]}   # inflated upstream; planners never inflate
+
+        # Debug context shared by the per-robot artifacts and the combined figure written after the
+        # loop. `base` is built once here (not per robot) because the combined figure needs it too,
+        # and it comes from the snapshot — exec captured that frame before the classifier call, and
+        # the occupancy above plus exec's marks_overlay.png both describe it, so all of this run's
+        # figures show one instant.
+        base = self._snapshot_frame(snap) if (self.save_debug and self.debug_dir) else None
+        debug_on = base is not None
+        world_paths: Dict[str, list] = {}
+        overlay = None
+
+        # Robot-independent artifacts: written ONCE per plan at the debug_dir top level, not once
+        # per robot (they are byte-identical for every robot — ~15 MB of redundant PNG encoding).
+        # Done BEFORE the loop so the frame and the occupancy view exist even when no robot manages
+        # to plan, which is exactly when they are most useful. `overlay` is also reused as each
+        # robot's route_planned.png canvas below, so it is rendered only this once.
+        if debug_on:
+            warn = self.get_logger().warn
+            overlay = render_inflation_overlay(base, cleared, ctx["infl"], meta, self.camera_name)
+            debug_io.save_raw_overhead(self.debug_dir, base, on_error=warn)
+            debug_io.save_inflation_overlay(self.debug_dir, overlay, on_error=warn)
 
         for name, labels in plans.items():
             if name not in self.world_pubs:
@@ -289,52 +312,34 @@ class SimplePathTranslator(Node):
                 continue
 
             self._publish(name, world_path, cur_xy)
+            world_paths[name] = world_path
             self.get_logger().info(
                 f"[{name}] Planned path: {len(world_path)} waypoints "
                 f"(grid {meta['width']}x{meta['height']} @ {meta['resolution']} m, "
                 f"planner={planner_name}).")
 
-            if self.save_debug and self.debug_dir and self.latest_rgb is not None:
+            if debug_on:
                 try:
                     out_dir = os.path.join(self.debug_dir, name)
                     os.makedirs(out_dir, exist_ok=True)
-                    base = cv2.cvtColor(np.ascontiguousarray(self.latest_rgb), cv2.COLOR_RGB2BGR)
-                    self._save_common_debug(out_dir, base, pix_labels, grid)
+                    # The VLM's raw picks, drawn in the style of the overlay it actually saw.
+                    debug_io.save_vlm_selections(out_dir, base, PRODUCTION_MAP_OVERLAY,
+                                                 labels, self.grid_px, on_error=warn)
                     dbg["start_world"] = cur_xy
-                    # Pass `cleared` (post-override occupancy) as the overlay's red layer.
-                    planner.save_debug(out_dir, base, cleared, meta, ctx, dbg, self.plan_params, camera=self.camera_name)
+                    # `cleared` (post-override occupancy) is the overlay's red layer; `overlay` is
+                    # the one rendered above, reused as this robot's route_planned.png canvas.
+                    planner.save_debug(out_dir, base, cleared, meta, ctx, dbg, self.plan_params,
+                                       camera=self.camera_name, overlay=overlay)
                 except Exception as exc:  # noqa: BLE001
                     self.get_logger().warn(f"[{name}] Debug save failed: {exc}")
 
-    # ------------------------------------------------------------------
-    def _save_common_debug(self, out_dir, base, pix_labels, grid) -> None:
-        """Shared (method-agnostic) debug: raw overhead, segmentation, grid overlay, occupancy."""
-        cv2.imwrite(os.path.join(out_dir, "raw_overhead.png"), base)
-
-        # CLIPSeg segmentation overlay (green=free, red=obstacle, gray=unknown).
-        seg_color = np.zeros_like(base)
-        seg_color[pix_labels == FREE] = (0, 180, 0)
-        seg_color[pix_labels == OCCUPIED] = (0, 0, 200)
-        seg_color[pix_labels == UNKNOWN] = (128, 128, 128)
-        cv2.imwrite(os.path.join(out_dir, "segmentation.png"),
-                    (0.5 * base + 0.5 * seg_color).astype(np.uint8))
-
-        # Raw + transparent grid overlay (what the VLM sees).
-        if self._grid_overlay is not None:
-            g = cv2.resize(self._grid_overlay, (base.shape[1], base.shape[0]))
-            if g.ndim == 3 and g.shape[2] == 4:
-                a = g[..., 3:4].astype(np.float32) / 255.0
-                comp = (base * (1 - a) + g[..., :3] * a).astype(np.uint8)
-            else:
-                comp = g[..., :3]
-            cv2.imwrite(os.path.join(out_dir, "grid_overlay.png"), comp)
-
-        # True occupancy map (white=free, black=occupied, gray=unknown), reoriented to match image.
-        g2 = np.flipud(grid.T)
-        occ = np.full((*g2.shape, 3), 128, np.uint8)
-        occ[g2 == FREE] = (255, 255, 255)
-        occ[g2 == OCCUPIED] = (0, 0, 0)
-        cv2.imwrite(os.path.join(out_dir, "occ_true.png"), occ)
+        # Combined figure for the whole plan (all robots on one image), at the debug_dir top level
+        # alongside the per-robot subdirectories — the same layout the offline harness produces.
+        if debug_on and world_paths:
+            debug_io.save_paths_with_waypoints(
+                os.path.join(self.debug_dir, "robot_paths_waypoints.png"),
+                base, world_paths, plans, self.grid_px, self.camera_name,
+                on_error=self.get_logger().warn)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

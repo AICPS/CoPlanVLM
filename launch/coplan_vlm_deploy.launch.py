@@ -18,9 +18,12 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     pkg_dir = str(get_package_share_directory('coplan_vlm'))
     grid_csv_path = pkg_dir + '/config/grid_cell_centers.csv'
-    # Debug artifacts dir, resolved relative to this package (a `debug/` folder at the package
-    # root, alongside launch/ and config/). Same __file__-relative pattern as config/.env below.
-    debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'debug'))
+    # Debug artifacts go to the WORKSPACE debug/ dir (not the install share tree), one directory
+    # per environment so a lab run and a sim run never overwrite each other. Four levels up from
+    # <ws>/install/coplan_vlm/share/coplan_vlm is the workspace root — same traversal map_gen uses
+    # for the shared occupancy snapshot.
+    ws_root = os.path.normpath(os.path.join(pkg_dir, '..', '..', '..', '..'))
+    debug_dir = os.path.join(ws_root, 'debug', 'deploy_real')
 
     # Load environment variables from .env
     env_path = os.path.join(os.path.dirname(__file__), '..', 'config/.env')
@@ -51,6 +54,9 @@ def generate_launch_description():
                     LaunchConfiguration('replan_period'), value_type=float)},
                 {'camera_info_topic': '/ueye/test/camera_info'},
                 {'camera': 'lab_test'},
+                # Same dir the translator writes its images to, so the VLM prompt/response land
+                # beside that run's artifacts.
+                {'debug_dir': debug_dir},
             ],
             remappings=[
                 ('/camera_image', '/ueye/test/image_raw'),
@@ -108,7 +114,6 @@ def generate_launch_description():
             {'save_debug': True},
             {'robot_names': [bot_name, bot2_name]},
             {'camera': 'lab_test'},   # overhead camera calibration for pixel<->world
-            {'image_topic': '/ueye/test/image_raw'},   # live overhead camera frames
         ]
     )
 
@@ -120,18 +125,6 @@ def generate_launch_description():
     #     name='joy_node'
     # )
 
-    # Data recording node (optional)
-    # Start only when pressed button 2 on joystick
-    logger_node = GroupAction([
-        Node(
-            package='coplan_vlm',
-            executable='node_Trajectory_Logger',
-            name='node_Trajectory_Logger',
-            output='screen',
-            emulate_tty=True,
-        ),
-    ])
-
     # Path visualizer node
     path_visualizer_node = Node(
         package='coplan_vlm',
@@ -141,7 +134,6 @@ def generate_launch_description():
         emulate_tty=True,
         parameters=[
             {'grid_csv': grid_csv_path},
-            {'map_path': pkg_dir + '/map_raw.png'},
             {'save_overlays': True},
             {'line_thickness': 8},
             {'circle_radius': 16},
@@ -149,6 +141,12 @@ def generate_launch_description():
             {'robot_color': [255, 0, 255]},  # Magenta for robot
             {'robot_names': [bot_name, bot2_name]},
             {'camera': 'lab_test'},   # overhead camera calibration for world<->pixel
+            # Real camera intrinsics — the SAME topic exec uses, so both nodes undistort the frame
+            # identically. Without this the node keeps the sim default (/ids_overhead/camera_info),
+            # never receives intrinsics, and cv2.undistort is silently skipped: overlays would be
+            # projected onto a distorted frame (error is <2 px near the image centre but ~175 px,
+            # roughly 0.8 m, at the corners) while exec plans on an undistorted one.
+            {'camera_info_topic': '/ueye/test/camera_info'},
         ],
         remappings=[
             ('/camera_image', '/ueye/test/image_raw'),
@@ -169,5 +167,4 @@ def generate_launch_description():
         path_translator_node,
         # joy_node,   # disabled — see commented joy_node definition above
         path_visualizer_node,
-        # logger_node,
     ])

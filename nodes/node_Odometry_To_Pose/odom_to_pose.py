@@ -19,7 +19,10 @@ from coord_transform import gazebo_to_ned_pose, yaw_from_quaternion
 
 class OdometryToPoseStamped(Node):
     def __init__(self):
-        super().__init__('node_odom_to_pose')
+        # Graph name matches the executable and the launch files' name= override, so the node is
+        # called the same thing whether it is launched or run bare with `ros2 run`. The sim launch
+        # runs two instances and overrides the second to node_Odometry_To_Pose_2.
+        super().__init__('node_Odometry_To_Pose')
 
         # Parameters
         self.declare_parameter('input_topic', '/raph/sim_ground_truth_pose')

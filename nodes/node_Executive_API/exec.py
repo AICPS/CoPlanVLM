@@ -3,12 +3,16 @@
 Executive API Node — Adaptive Path‑Planning Edition (Responses API)
 ===================================================================
 Receives an operator goal prompt on `/nav/prompt`, and plans in two LLM
-calls:
+calls, both constrained by strict JSON schemas (structured outputs) so the
+reply shape is guaranteed by decoding rather than requested in prose:
 
 1. **Classifier** — a text‑only call tags the instruction with a task
-   type (`nav2point` / `maneuver` / `coverage`; see prompt_gen.py).
+   type (`nav2point` / `maneuver` / `coverage`; see prompt_gen.py). The
+   `classifier_schema()` enum makes any other answer impossible.
 2. **Planner** — a vision call that, given the selected per‑task system
-   prompt and an overhead grid image, returns the route(s).
+   prompt and the `marked_obs` overlay image, returns the route(s) under
+   `route_schema()`. Chain‑of‑thought is always on: the schema declares a
+   leading `reasoning` field, so the model reasons BEFORE emitting routes.
 
 Publishes:
 
@@ -17,7 +21,10 @@ Publishes:
   planner and each robot's label list.
 
 The task type (controller) drives `prompt_gen.generate_prompt`, which assembles the system prompt and
-renders the matching overlay image together, and selects the downstream planner (`_TASK_ROUTING`).
+renders the matching overlay image together, and selects the downstream planner (`TASK_ROUTING`).
+
+This mirrors scripts/test_pipeline.py exactly — both import the prompts, schemas and routing from
+prompt_gen, so what is validated offline is what the robots execute.
 
 No chat history is stored – each call is stateless.
 """
@@ -38,26 +45,18 @@ from std_msgs.msg import String
 from cv_bridge import CvBridge
 from openai import OpenAI
 
+import debug_io
+
 from node_Executive_API.prompt_gen import (
     generate_prompt,
+    classifier_schema,
+    route_schema,
     CONTROLLERS,
+    TASK_ROUTING,
+    PRODUCTION_MAP_OVERLAY,
     CLASSIFIER_SYSTEM_PROMPT,
 )
 from node_Executive_API.map_gen import run_segmentation, _node_to_pil
-
-
-def _overlay_for(controller: str) -> str:
-    """Production overlay per controller: coverage -> battleship grid, else set-of-marks."""
-    return "battleship" if controller == "coverage" else "points"
-
-# Task type -> (model output key, downstream planner published on /vlm_plan).
-# nav2point / maneuver return ordered "waypoints" routed through A*; coverage returns an unordered
-# "regions" cell set routed through the coverage (TSP) planner.
-_TASK_ROUTING = {
-    "nav2point": ("waypoints", "astar"),
-    "maneuver":  ("waypoints", "astar"),
-    "coverage":  ("regions",   "coverage"),
-}
 
 # ----------------------------------------------------------------------
 # Node definition
@@ -85,6 +84,10 @@ class ExecutiveApiNode(Node):
         self.declare_parameter('replan_period', 120.0)          # seconds between dynamic replans
         # Camera calibration key (passed to map builders via self).
         self.declare_parameter('camera', 'gazebo')              # "gazebo" | "lab_test"
+        # Where to persist the VLM exchange (vlm_prompt.txt / vlm_response.txt). Empty = disabled,
+        # the same convention node_Path_Translator uses for its debug_dir. Launch files point this
+        # at the same per-environment directory the translator writes its images to.
+        self.declare_parameter('debug_dir', '')
 
         self.robot_names: list[str] = list(self.get_parameter('robot_names').value)
         self.api_key: str   = self.get_parameter('openai_api_key').value
@@ -97,6 +100,7 @@ class ExecutiveApiNode(Node):
         self.replan_mode: str = self.get_parameter('replan_mode').value
         self.replan_period: float = float(self.get_parameter('replan_period').value)
         self.camera_name: str = self.get_parameter('camera').get_parameter_value().string_value
+        self.debug_dir: str = self.get_parameter('debug_dir').get_parameter_value().string_value
 
         # ---------- OpenAI client ----------
         self.client = OpenAI(api_key=self.api_key or None)
@@ -211,22 +215,39 @@ class ExecutiveApiNode(Node):
             self.get_logger().error('API key missing — cannot plan.')
             return
 
+        # No overhead frame yet -> nothing to segment or render. Bail out explicitly: without this
+        # run_segmentation() would no-op (leaving occ_grid None, so the marked_obs overlay would
+        # report "(none)" blocked cells) and _node_to_pil() would then raise on the None image.
+        if self.camera_image is None:
+            self.get_logger().warn(
+                f"No overhead frame received on '{self.camera_image_topic}' yet — cannot plan. "
+                "Is the camera (or the sim) publishing?")
+            return
+
+        # The classifier's task type selects both the model output key and the downstream planner.
+        # Resolved BEFORE the call because result_key is part of the reply schema below.
+        result_key, planner = TASK_ROUTING[self.current_task_type]
+
         # NOTE: single-threaded executor — the VLM call below blocks this node's callbacks
         # (incl. /nav/prompt) until it returns. A timer cannot re-enter while a plan is in
         # flight, so replans never overlap. Acceptable for this use.
         try:
             # Run CLIPSeg once per replan tick: stores node.pix_labels and writes _OCC_FILE so
-            # translate.py can read the occupancy without running its own CLIPSeg instance.
+            # translator_node.py can read the occupancy without running its own CLIPSeg instance.
             run_segmentation(self)
 
             # generate_prompt assembles the system prompt AND renders the matching overlay image,
-            # so the two always agree. Production keeps today's overlay-per-controller + no CoT.
+            # so the two always agree. cot=True appends the controller's chain-of-thought scaffold;
+            # the schema below makes the model fill in its "reasoning" before the routes.
             system_prompt, map_b64 = generate_prompt(
-                self.current_prompt, self.current_task_type,
-                _overlay_for(self.current_task_type),
+                self.current_prompt, self.current_task_type, PRODUCTION_MAP_OVERLAY,
                 pil_img=_node_to_pil(self), occ_grid=self.occ_grid, occ_meta=self.occ_meta,
-                camera=self.camera_name, robot_poses=self.robot_poses, cot=False)
+                camera=self.camera_name, robot_poses=self.robot_poses, cot=True)
 
+            # Structured outputs: the reply can only be the fixed {reasoning, result_key{robots…}}
+            # shape, so invented keys / missing robots are impossible at decode time. Waypoints are
+            # left unconstrained (no allowed_labels enum) — the planner projects picks onto free
+            # cells downstream.
             response = self.client.responses.create(
                 model=self.model,
                 temperature=self.temperature,
@@ -242,22 +263,38 @@ class ExecutiveApiNode(Node):
                         ],
                     }
                 ],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "route_plan",
+                        "strict": True,
+                        "schema": route_schema(result_key, self.robot_names, cot=True),
+                    }
+                },
             )
             reply_json: str = response.output_text.strip()
 
+            # Persist the exact exchange so a live run can be reconstructed afterwards (the offline
+            # harnesses save the same files). Never raises — failures go to the ROS log.
+            # marks_overlay.png is written from map_b64, so it is byte-for-byte the image the model
+            # saw; this node is the only place that image exists in the live pipeline.
+            if self.debug_dir:
+                warn = self.get_logger().warn
+                debug_io.save_vlm_exchange(self.debug_dir, system_prompt, reply_json, on_error=warn)
+                debug_io.save_marks_overlay(self.debug_dir, map_b64, on_error=warn)
+
             # ------------- safe JSON parse -------------
-            # Tolerate ```json fences / surrounding prose the model sometimes adds.
+            # Strict mode already guarantees valid JSON; this stays as a cheap guard against an
+            # empty reply or a refusal, and tolerates fences if the format is ever relaxed.
             result = self._parse_json_reply(reply_json)
             if result is None:
                 self.get_logger().error(
                     f'Malformed JSON from model - cannot parse. Raw reply: {reply_json!r}')
                 return
 
-            # The classifier's task type selects both the model output key and the downstream
-            # planner. Routes must be a dict of {robot_name: [labels]}; the translator routes
-            # each robot's list to /<robot>/waypoint_path via the named planner. Fail loudly on a
-            # bad shape.
-            result_key, planner = _TASK_ROUTING[self.current_task_type]
+            # Routes must be a dict of {robot_name: [labels]}; the translator routes each robot's
+            # list to /<robot>/waypoint_path via the named planner. The schema enforces this, so the
+            # checks below only fire if structured output was bypassed. Fail loudly on a bad shape.
             routes = result.get(result_key, {})
             if not isinstance(routes, dict):
                 self.get_logger().error(
@@ -277,11 +314,17 @@ class ExecutiveApiNode(Node):
             path_msg.data = json.dumps({"planner": planner, "routes": routes})
             self.path_pub.publish(path_msg)
 
-            # Log through ROS logger (INFO)
-            self.get_logger().info(f"[exec] Planned ({planner}) routes: {path_msg.data}")
+            # Log through ROS logger (INFO). Reasoning first — it is what the routes were derived
+            # from, and the schema makes the model generate it in that order.
             reasoning = result.get('reasoning', '')
             if reasoning:
                 self.get_logger().info(f"[exec] reasoning: {reasoning}")
+            # Report the task type as well as the planner: nav2point and maneuver both route to
+            # "astar", so the planner name alone does not identify the chosen category — and in
+            # dynamic mode the classification line only prints once per prompt, not per replan.
+            self.get_logger().info(
+                f"[exec] Planned [task={self.current_task_type} -> planner={planner}] "
+                f"routes: {path_msg.data}")
 
         except Exception as exc:
             self.get_logger().error(f'Path‑planning failed: {exc}')
@@ -309,6 +352,10 @@ class ExecutiveApiNode(Node):
     def _classify_task(self, instruction: str) -> str | None:
         """Return one of CONTROLLERS, or None if the classifier can't produce a valid one.
 
+        The reply is constrained by classifier_schema(), whose enum over CONTROLLERS makes an
+        out-of-vocabulary task type impossible at decode time. The membership check below is kept
+        as a cheap guard against an empty reply or a refusal.
+
         A None result means "don't plan this prompt" — there is no default task type to fall back on.
         """
         try:
@@ -322,6 +369,14 @@ class ExecutiveApiNode(Node):
                         "content": [{"type": "input_text", "text": instruction}],
                     }
                 ],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "task_classification",
+                        "strict": True,
+                        "schema": classifier_schema(),
+                    }
+                },
             )
             result = self._parse_json_reply(response.output_text.strip())
             task_type = (result or {}).get('task_type')

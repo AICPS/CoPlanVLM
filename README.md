@@ -1,130 +1,149 @@
-# CoPlanVLM – LLM‑Powered Navigation Stack
+# CoPlanVLM – VLM‑Powered Multi‑Robot Mission Planning
 
-> **Multi‑node ROS 2 workspace for natural‑language control, path‑planning, and autonomous execution in Gazebo Ignition Fortress using Turtlebot4**
+> **ROS 2 workspace that turns a natural‑language instruction into coordinated motion for two TurtleBot 4s — in Ignition Gazebo Fortress or in the REEF Autonomous Vehile Laboratory.**
 
-## Table of Contents
+## Table of Contents
 
 1. [Introduction](#introduction)
 2. [Features](#features)
-3. [Project Architecture](#project-architecture)
-4. [Node Reference](#node-reference)
-5. [Topics & Interfaces](#topics--interfaces)
+3. [Project Architecture](#project-architecture)
+4. [Node Reference](#node-reference)
+5. [Topics & Interfaces](#topics--interfaces)
 6. [Prerequisites](#prerequisites)
-7. [Workspace Setup](#workspace-setup)
+7. [Workspace Setup](#workspace-setup)
 8. [Configuration](#configuration)
-9. [Running the Stack](#running-the-stack)
-10. [Testing & Debugging](#testing--debugging)
-11. [Development Guidelines](#development-guidelines)
-12. [License](#license)
+9. [Running in Simulation](#running-in-simulation)
+10. [Running in the Lab](#running-in-the-lab)
+11. [Testing & Debugging](#testing--debugging)
+12. [Development Guidelines](#development-guidelines)
+13. [License](#license)
 
 ---
 
 ## Introduction
 
-CoPlanVLM turns high‑level human instructions into safe, interpretable robot motion.  The stack couples OpenAI GPT models with ROS 2 Humble nodes to:
+CoPlanVLM plans missions for **two robots — `raph` and `donnie`** — from a single operator
+sentence. One instruction covers both; the planner decides what each robot does.
 
-* parse natural‑language commands,
-* plan collision‑free world‑frame paths, and
-* drive a TurtleBot 4 along those paths under velocity control.
+A prompt runs through two LLM calls:
 
-Everything is written in **Python 3.10+** for quick iteration and leverages standard ROS 2 patterns (publish/subscribe, parameters, launch files).
+1. **Classifier** (text) tags the instruction as one of three task types — `nav2point`, `maneuver`, or `coverage`.
+2. **Planner** (vision) sees an overhead camera frame marked with a grid of candidate points and returns a route per robot. Chain‑of‑thought is used to produce a `reasoning` field first, so the model reasons before it commits to a route.
+
+The task type determines the low‑level planner that turns those cell picks into an obstacle‑free route: A* for nav2point and maneuver tasks, or a TSP‑ordered sweep for coverage.
+
+Everything was developed on Python 3.10+ on ROS 2 Humble. The same code runs in sim and on hardware — only the camera calibration and the pose source differ.
 
 ---
 
 ## Features
 
-* **Natural‑Language Interface → Motion** – Speak or type intents such as “Park between rows three and four” and receive `/cmd_vel` messages.
-* **Modular Nodes** – Separate nodes for language understanding, path translation, execution monitoring, and low‑level following.
-* **OpenAI Integration** – Clean separation between cloud calls (Executive node) and robot runtime; API key handled via environment or parameter.
-* **Grid & Pixel Support** – Path Translator converts grid IDs or pixel coordinates (CSV) to real‑world metres.
-* **ROS 2 Launch Ready** – Each node ships with example launch files; combine the full stack or run modules individually.
-* **Ignition Gazebo Support** – Seamless simulation workflow using Ignition Fortress and official TurtleBot 4 packages.
-* **Extensive Logging** – All non‑user messages are promoted to `WARN` for simpler debugging; otherwise concise `INFO` output.
+* **One instruction, two robots** – the planner assigns work to `raph` and `donnie` together.
+* **Three task types** – `nav2point` (go there), `maneuver` (go there a particular way), `coverage`
+  (sweep a region), each with its own prompt and low‑level planner.
+* **Vision grounding** – CLIPSeg segments traversable floor into an occupancy grid; the VLM picks cells off a set‑of‑marks overlay built from that same grid.
+* **Sim ↔ hardware parity** – identical nodes and topics; a `camera` parameter selects the calibration. Poses always arrive as NED `PoseStamped` on `/<robot>/ned/pose_stamped` — from MoCap in the lab, or from `node_Odometry_To_Pose` converting Gazebo odometry in sim to NED pose.
+* **Debugging Figures** – every run writes the exact prompt, the exact image the model saw, and the resulting routes to a per‑environment `debug/` directory.
 
 ---
 
 ## Project Architecture
 
 ```
-[User / CLI / Voice]
-        │ natural‑language           ┌───────────────────────┐
-        ▼                            │  TriageApiNode        │
-┌─────────────────┐  prompt + chat   │  • gate conversation  │
-│ TriageApiNode   ├─────────────────►│  • forward prompts    │
-└─────────────────┘                  └───────────────────────┘
-                                               │ prompt JSON
-                                               ▼
-                                   ┌────────────────────────┐
-                                   │ ExecutiveApiNode       │
-                                   │ • OpenAI call (o4‑mini)│
-                                   │ • publishes /path      │
-                                   │   & /nav/status        │
-                                   └─────────┬──────────────┘
-                                 world path  │ Float32MultiArray
-                                             ▼
-                                   ┌────────────────────────┐
-                                   │ Path_Translator        │
-                                   │ • grid→world metres    │
-                                   └─────────┬──────────────┘
-                                world path   │ Float32MultiArray
-                                             ▼
-                                   ┌────────────────────────┐
-                                   │ Controller             │
-                                   │ • path follower        │
-                                   │ • publishes /cmd_vel   │
-                                   └────────────────────────┘
+operator sentence
+        │  /nav/prompt  (std_msgs/String)
+        ▼
+┌───────────────────────────────────────┐
+│ node_Executive_API                    │
+│  1. classifier LLM  → task type       │   overhead camera
+│  2. CLIPSeg         → occupancy grid  │◄──────────────────
+│  3. planner VLM     → cells per robot │
+└───────────────┬───────────────────────┘
+                │  /vlm_plan
+                │  {"planner": "astar"|"coverage",
+                │   "routes": {"raph": [...], "donnie": [...]}}
+                ▼
+┌───────────────────────────────────────┐
+│ node_Path_Translator                  │
+│  cells → world metres, then A* or     │
+│  coverage‑TSP around obstacles        │
+└───────┬───────────────────────┬───────┘
+        │ /raph/waypoint_path   │ /donnie/waypoint_path
+        ▼                       ▼
+┌───────────────┐       ┌───────────────┐
+│ node_Control  │       │ node_Control  │
+│    (raph)     │       │   (donnie)    │
+└───────┬───────┘       └───────┬───────┘
+        │ /raph/cmd_vel         │ /donnie/cmd_vel
+        ▼                       ▼
+     TurtleBot 4             TurtleBot 4
 ```
 
-Each block may be launched stand‑alone for unit testing.
+`node_Path_Visualizer` subscribes alongside this chain and draws both robots' plans and live poses
+on the overhead frame.
+
+The Executive shares its occupancy grid **and the camera frame it was computed from** with the
+Translator through `debug/coplan_vlm_occupancy.npz`, so CLIPSeg runs once per plan and every debug
+figure shows the same instant the VLM saw.
 
 ---
 
 ## Node Reference
 
-| Node (exec)                                 | Purpose                                                                                  | Key Parameters                             |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------ |
-| **`coplan_vlm/basic_LLM_control_node`** | One‑shot language→Twist mapper (demo)                                                    | `openai_api_key`, `temperature` (optional) |
-| **`node_Triage_API`**                       | Conversational front‑end; throttles prompts while waiting on the planner                 | `chat_timeout`, `openai_api_key`           |
-| **`node_Executive_API`**                    | Sends world snapshot & operator prompt to GPT; returns `/path` list & `/nav/status` JSON | `openai_api_key`                           |
-| **`node_Path_Translator`**                  | Converts grid labels or pixel (u,v) coords to world metres and publishes `/world_path`   | `csv_file`, `origin_label`, `metres_per_pixel_x`, `metres_per_pixel_y` |
-| **`node_Control`**                       | Subscribes `/world_path`, drives TurtleBot 4 with `/cmd_vel`                             | `lookahead_dist`, `kp`, `max_speed`        |
+| Executable | Module | Role |
+| --- | --- | --- |
+| `node_Executive_API` | `node_Executive_API.exec` | Classifier + planner LLM calls, CLIPSeg, publishes `/vlm_plan` |
+| `node_Path_Translator` | `node_Path_Translator.translator_node` | Cell labels → metric waypoints via A* / coverage controllers|
+| `node_Control` | `node_Control.control` | Path follower → `/cmd_vel`. **One instance per robot** |
+| `node_Path_Visualizer` | `node_Path_Visualizer.path_visualizer` | Live overlay of plans + poses |
+| `node_Odometry_To_Pose` | `node_Odometry_To_Pose.odom_to_pose` | **Sim only.** Gazebo odom → NED pose. **One per robot** |
+| `obs_seg_cli` | `obs_seg.cli` | Standalone segmentation / occupancy CLI |
+
+**How two robots work:** `node_Control` and `node_Odometry_To_Pose` are each launched **twice**,
+remapped into `/raph/…` and `/donnie/…`. The Executive, Translator and Visualizer are single
+instances that handle both robots via their `robot_names` parameter.
 
 ---
 
 ## Topics & Interfaces
 
-| Topic         | Type                          | Publisher → Subscriber              |
-| ------------- | ----------------------------- | ----------------------------------- |
-| `/path`       | `std_msgs/String` (JSON list) | ExecutiveApiNode → Path\_Translator |
-| `/world_path` | `std_msgs/Float32MultiArray`  | Path\_Translator → Control    |
-| `/cmd_vel`    | `geometry_msgs/Twist`         | Control → TurtleBot 4 base    |
-| `/nav/status` | `std_msgs/String` (JSON)      | ExecutiveApiNode → TriageApiNode    |
-| `/openai/log` | `std_msgs/String` (debug)     | *optional*                          |
+| Topic | Type | Publisher → Subscriber |
+| --- | --- | --- |
+| `/nav/prompt` | `std_msgs/String` | operator → Executive |
+| `/vlm_plan` | `std_msgs/String` (JSON) | Executive → Translator, Visualizer |
+| `/<robot>/waypoint_path` | `std_msgs/Float32MultiArray` `[x1,y1,x2,y2,…]` | Translator → Control |
+| `/<robot>/cmd_vel` | `geometry_msgs/Twist` | Control → base |
+| `/<robot>/ned/pose_stamped` | `geometry_msgs/PoseStamped` (BEST_EFFORT) | Odom shim *(sim)* / MoCap *(lab)* → everyone |
+| `/path_visualization` | `sensor_msgs/Image` | Visualizer → RViz / `showimage` |
+| overhead image | `sensor_msgs/Image` | `/ids_overhead/image` *(sim)* · `/ueye/test/image_raw` *(lab)* |
+| overhead info | `sensor_msgs/CameraInfo` | `/ids_overhead/camera_info` *(sim)* · `/ueye/test/camera_info` *(lab)* |
+
+`/vlm_plan` payload:
+
+```json
+{"planner": "astar", "routes": {"raph": ["G7", "H8"], "donnie": ["C3"]}}
+```
+
+`planner` is `astar` for `nav2point`/`maneuver` and `coverage` for `coverage`.
 
 ---
 
 ## Prerequisites
 
-* **Robot** – TurtleBot 4 running ROS 2 Humble (tested) or newer.
-* **Workstation / Dev PC** – Ubuntu 22.04 / Python 3.10+.  (macOS/Windows WSL work too for development.)
-* **ROS 2 Packages** – `rclpy`, `geometry_msgs`, `std_msgs`, `tf_transformations`, `python-csv`, `turtlebot4-simulator`, `turtlebot4-description`, `turtlebot4-msgs`, `turtlebot4-navigation`, `turtlebot4-node`.
-* **Python Packages** –
-
-  * `openai>=1.15.0`
-  * `python-dotenv` *(optional)*
-  * `numpy`, `pandas` (only for tooling, not runtime)
+* **OS / runtime** – Ubuntu 22.04, ROS 2 Humble, Python 3.10+.
+* **Simulation** – Ignition Gazebo **Fortress** plus the TurtleBot 4 sim packages. Follow the
+  [TurtleBot 4 simulator install guide](https://turtlebot.github.io/turtlebot4-user-manual/software/turtlebot4_simulator.html#installation).
+* **Python** – see [`requirements.txt`](requirements.txt). Includes `torch` / `transformers` for
+  CLIPSeg; a GPU is recommended but not required.
+* **OpenAI API key** – see [Configuration](#configuration).
 
 ---
 
 ## Workspace Setup
 
-
-Follow the instructions in this [link](https://turtlebot.github.io/turtlebot4-user-manual/software/turtlebot4_simulator.html#installation) for installation of turtlebot4 dependencies and gazebo ignition fortress.
-
-
 ```bash
-# 1. create a ROS 2 overlay workspace (if you don’t have one)
-mkdir -p ~/ros2_ws/src && cd ~/ros2_ws
+# 1. create a ROS 2 overlay workspace (if you don't have one)
+mkdir -p ~/turtle4_ws/src && cd ~/turtle4_ws
 
 # 2. clone the repo
 git clone <your-repo-url> src/CoPlanVLM
@@ -132,118 +151,236 @@ git clone <your-repo-url> src/CoPlanVLM
 # 3. install Python deps
 python3 -m pip install -r src/CoPlanVLM/requirements.txt
 
-# 4. resolve ROS 2 deps & build
+# 4. resolve ROS 2 deps & build — FROM THE WORKSPACE ROOT
 rosdep update
 rosdep install --from-paths src --ignore-src -y
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-> **Tip:** add the `source install/setup.bash` line to your `~/.bashrc` for convenience.
+> **Always run `colcon build` from the workspace root.** colcon builds relative to your working
+> directory and will silently adopt any directory containing a `package.xml` as the workspace
+> root. Running it from inside `src/CoPlanVLM/` produces a green "Finished" while writing a nested
+> `build/`, `install/`, `log/` tree that the launch files never look at.
+
+> **Tip:** add `source ~/turtle4_ws/install/setup.bash` to your `~/.bashrc`.
 
 ---
 
 ## Configuration
 
-### OpenAI Credentials
+### OpenAI credentials
 
-The stack requires an **OpenAI API key**.
+Both launch files load `config/.env` and read **`MY_API_KEY`**:
 
 ```bash
-export OPENAI_API_KEY="sk-..."   # shell
+# src/CoPlanVLM/config/.env
+MY_API_KEY=sk-...
 ```
 
-Alternatively supply `-p openai_api_key:=...` to individual nodes.
+Launch fails immediately with `MY_API_KEY not found in .env file` if it is missing.
 
-You may also store keys in a `.env` file when using `python-dotenv`.
+### Camera calibration
 
-### Launch Parameters
+Every node that converts pixels ↔ metres takes a `camera` parameter — `gazebo` or `lab_test` —
+selecting an entry in `coord_transform.CAMERAS` (focal lengths, principal point, mounting height).
+The launch files set it; you should not need to.
 
-All nodes expose ROS 2 parameters.  See `launch/` directory or run:
+### Other parameters
 
 ```bash
-ros2 param dump /executive_api_node   # after startup
+ros2 param list /node_Executive_API      # after startup
+ros2 launch coplan_vlm coplan_vlm_4sim.launch.py --show-args
 ```
 
 ---
 
-## Running the Stack
+## Running in Simulation
 
-### 1. Start Ignition Gazebo
+Three terminals from the **workspace root**.
 
-Open a terminal and start the simulator first:
+### 1. Start the simulator and both robots
 
 ```bash
-ros2 launch coplan_vlm turtlebot4_ignition.launch.py
+./src/CoPlanVLM/scripts/launch_all.sh
 ```
 
-#### Set the robot namespace
-
-Use `raph` as the robot namespace.
-
-### 2. Wait for startup
-
-Wait until the robot is spawned and you can see the TurtleBot come up with the expected status lights. Wait until you see four lights on, except Wi-Fi.
-
-### 3. Start the VLM stack
-
-Open a second terminal and launch the planning and control stack:
+This brings up the Ignition world with `raph`, waits `IGNITION_DELAY` seconds (default 15) for the
+world to settle, then runs `spawn_second_robot.sh` to add `donnie` and its controllers. Both
+robots come from this one script.
 
 ```bash
-ros2 launch coplan_vlm coplan_vlm_4sim.launch.py openai_api_key:=$OPENAI_API_KEY
+IGNITION_DELAY=25 ./src/CoPlanVLM/scripts/launch_all.sh    # slow machine
+./src/CoPlanVLM/scripts/launch_all.sh donnie 1.5 2.0       # override donnie's spawn pose
 ```
 
-This starts **Triage → Executive → Translator → Controller** and binds the CLI prompt for the operator.
+Wait until both robots are spawned and their controllers are up. Ctrl‑C tears everything down and
+sweeps orphaned sim processes.
 
-### 4. Talk to the robot
+### 2. Start the planning stack
 
-Hold `A` to talk, then release it when you are done speaking.
-
-Alternatively, to send a text command from the terminal:
 ```bash
-ros2 topic pub --once /user_text std_msgs/msg/String "{data: 'Find the green block and drive to it'}"
+ros2 launch coplan_vlm coplan_vlm_4sim.launch.py
 ```
 
-### 5. Recovery steps
+Starts the Executive, Translator, Visualizer, and one Control + Odometry‑to‑Pose pair per robot.
 
-If you run into an image-type issue or the controller is already stuck from a previous run, restart the computer to clear the existing processes and try again.
-
-### 6. Individual Nodes (Optional)
-
-Run any module on its own for unit tests, e.g.:
+Optional replanning arguments:
 
 ```bash
-ros2 run coplan_vlm node_Path_Translator \
-  --ros-args -p csv_file:=maps/grid_lookup.csv -p pixel_sign_x:=-1 -p pixel_sign_y:=1
+ros2 launch coplan_vlm coplan_vlm_4sim.launch.py replan_mode:=dynamic replan_period:=30.0
+```
+
+`static` (the default) plans once per prompt; `dynamic` re‑plans the same prompt on a timer.
+
+### 3. Send a mission
+
+```bash
+./src/CoPlanVLM/scripts/send_prompt.sh "Send raph to the chair and donnie to the table"
+./src/CoPlanVLM/scripts/send_prompt.sh "Sweep the open floor with both robots"
+```
+
+Watch it work:
+
+```bash
+ros2 topic echo /vlm_plan               # task type, planner, cells per robot
+ros2 topic echo /raph/waypoint_path     # metric waypoints
+ros2 topic echo /donnie/cmd_vel         # velocity commands
+```
+
+The Executive logs the chosen task type, e.g.
+`[exec] Planned [task=coverage -> planner=coverage] routes: {...}`.
+
+---
+
+## Running in the Lab
+
+Same stack, minus the simulator. The lab replaces two things: MoCap publishes robot poses
+directly, and the ueye overhead camera replaces the sim camera. Because MoCap already publishes
+NED `PoseStamped`, the deploy launch **omits both `node_Odometry_To_Pose` converters** — they exist
+only to translate Gazebo odometry.
+
+### 1. Bring up the room
+
+<!-- TODO: MoCap and ueye camera startup instructions go here. -->
+
+> **Placeholder.** The commands that start the motion‑capture system and the ueye camera driver
+> live outside this repo and have not been documented yet.
+
+Before launching, these four topics must be publishing:
+
+| Topic | Source |
+| --- | --- |
+| `/raph/ned/pose_stamped` | MoCap |
+| `/donnie/ned/pose_stamped` | MoCap |
+| `/ueye/test/image_raw` | ueye overhead camera |
+| `/ueye/test/camera_info` | ueye overhead camera |
+
+Verify each is live and has a publisher:
+
+```bash
+ros2 topic list | grep -E "ned/pose_stamped|ueye"
+ros2 topic hz /raph/ned/pose_stamped
+ros2 topic hz /donnie/ned/pose_stamped
+ros2 topic hz /ueye/test/image_raw
+ros2 topic echo --once /ueye/test/camera_info
+```
+
+A missing `camera_info` is the quiet failure mode: the stack skips lens undistortion rather than
+erroring, and overlays drift from reality toward the edges of the frame.
+
+### 2. Start the planning stack
+
+```bash
+ros2 launch coplan_vlm coplan_vlm_deploy.launch.py
+```
+
+Starts the Executive, Translator, Visualizer, and one Control node per robot — all with
+`camera:=lab_test`.
+
+### 3. Send a mission
+
+Identical to sim:
+
+```bash
+./src/CoPlanVLM/scripts/send_prompt.sh "Send raph to the door and donnie to the window"
 ```
 
 ---
 
 ## Testing & Debugging
 
-* **ROS 2 CLI :** 
-  * `/world_path` to verify translation.
-  * `/path` -> The grid path generated by the VLM agent
-  * `/world_path` -> The waypoints generated by converted the grid path centers
-  * `/raph/cmd_vel` -> The velocity topic for the turtlebot  
-* To visualize the camera feed
-  * `ros2 run image_tools showimage image:=/ids_overhead/image`
-* **rqt\_console / rqt\_graph** – inspect logs and topic flow.
-* **Simulation** – Use Gazebo‑classic or Ignition with TurtleBot 4 model to test without hardware.
-* **Unit Tests** – See `tests/` for pytest cases.
+### Debug artifacts
+
+Each run writes to its own directory under `debug/`, so runs never overwrite each other:
+
+| Directory | Written by |
+| --- | --- |
+| `debug/gazebo_sim` | live sim run |
+| `debug/deploy_real` | live lab run |
+| `debug/offline_test_sim` | `test_pipeline.py` |
+| `debug/offline_test_real` | `test_pipeline_real.py` |
+
+Each contains:
+
+| File | Contents |
+| --- | --- |
+| `marks_overlay.png` | **byte‑exact copy of the image sent to the VLM** |
+| `vlm_prompt.txt` / `vlm_response.txt` | the exact exchange |
+| `raw_overhead.png` | the undistorted camera frame the plan was built from |
+| `inflation_overlay.png` | occupancy: red = obstacle, yellow = inflation margin |
+| `robot_paths_waypoints.png` | both robots' final routes on one image |
+| `<robot>/` | per‑robot `vlm_selections.png`, `route_centroids.png`, `route_planned.png` |
+
+Every figure in a directory shows the same camera frame, so they can be compared directly.
+
+### Offline harnesses
+
+These run the full planning pipeline on a saved image — no sim, no robots. **Each run spends
+OpenAI API credits.**
+
+| Script | Purpose |
+| --- | --- |
+| `scripts/test_pipeline.py` | The reference pipeline on a sim overhead image |
+| `scripts/test_pipeline_real.py` | Same, on a real lab image with `lab_test` calibration |
+| `scripts/test_battleship_baseline.py` | Baseline: plain battleship grid instead of set‑of‑marks |
+| `scripts/test_regression_only.py` | Baseline: raw pixel coordinates, no grid |
+
+```bash
+python3 src/CoPlanVLM/scripts/test_pipeline.py \
+  --prompt "Send raph to the chair and donnie to the table"
+```
+
+`scripts/test_map_gen.py` renders overlays with **no** API calls — useful for checking the image
+before spending a request.
+
+### Live inspection
+
+```bash
+ros2 node list                                       # every node up?
+ros2 topic echo /vlm_plan
+ros2 run image_tools showimage --ros-args -r image:=/path_visualization
+rqt_graph                                            # topic wiring
+```
 
 ---
 
 ## Development Guidelines
 
-1. **Keep nodes single‑responsibility.**
-2. **No secrets in code.**  Use env vars or ROS 2 parameters.
-3. **No blocking calls in callbacks.**  Use threads or `rclpy.executors.MultiThreadedExecutor` where required.
-4. **Write doc‑strings** and keep this README in sync with code changes.
-5. **Run `ruff` & `black`.**  Lint before pushing.
+1. **Shared logic is ROS‑free.** Libraries under `nodes/` (`coord_transform`, `obs_seg`,
+   `debug_io`) import no `rclpy`, so live nodes and offline harnesses run identical code. Anything
+   validated offline is what the robots execute.
+2. **One source of truth per contract.** Prompts, schemas and task→planner routing all live in
+   `node_Executive_API/prompt_gen.py`; both the Executive and the harnesses import from it.
+3. **Debug artifacts go through `debug_io`** — never an ad‑hoc `cv2.imwrite`. One writer means one
+   filename, one failure mode, and no drift between environments.
+4. **Keep nodes single‑responsibility** and avoid blocking work in callbacks.
+5. **No secrets in code.** Use `config/.env` or ROS 2 parameters.
+6. **Rebuild after changing entry points**, `setup.py`, or adding a package directory.
+7. **Keep this README in sync** with the code.
 
 ---
 
 ## License
 
-Distributed under the Apache 2.0 License (see `LICENSE`).
+Distributed under the Apache 2.0 License (see [`LICENSE`](LICENSE)).

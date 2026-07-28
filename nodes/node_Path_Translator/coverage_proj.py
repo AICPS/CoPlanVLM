@@ -1,4 +1,4 @@
-"""Coverage (region-sweep) planner — a pluggable translate.py planner module.
+"""Coverage (region-sweep) planner — a pluggable translator_node.py planner module.
 
 Method: project each region-cell centroid (plus the robot pose) onto the nearest FREE cell of the
 INFLATED occupancy grid, order the projected points with an open Travelling-Salesman tour that
@@ -14,7 +14,7 @@ matrix scales to the full grid (14x8 = 112 cells). The tour is solved with neare
 Pluggable planner interface (shared with astar_proj):
     build_reference(labels, pose_xy, grid_px, camera) -> (ref, unknown)
     plan(reference_xy, ctx, meta, params) -> (world_path, debug)
-    save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera) -> None
+    save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera, overlay) -> None
 
 The planning grid is inflated upstream (exec.run_segmentation / test_pipeline), so ctx is simply
 {"infl": <inflated grid>} built by the caller — this module never inflates.
@@ -30,7 +30,7 @@ import numpy as np
 from coord_transform import pixel_to_world
 from obs_seg import FREE
 from obs_seg.occupancy import world_to_cell, cell_to_world
-from grid_planner import astar, project_to_free, simplify_path_los
+from .grid_planner_utils import astar, project_to_free, simplify_path_los
 
 from . import astar_proj
 
@@ -39,7 +39,7 @@ PARAMS: dict = {
     "projection_radius": 1.0,   # m; region cells with no free cell within this radius are dropped
 }
 
-# 8-connected neighbourhood (dx, dy) with Euclidean step costs — matches grid_planner.astar.
+# 8-connected neighbourhood (dx, dy) with Euclidean step costs — matches grid_planner_utils.astar.
 _NEIGHBORS8 = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
 _DIAG = 1.41421356
 
@@ -214,6 +214,10 @@ def plan(reference_xy, ctx, meta, params):
     return world_path, debug
 
 
-def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=None):
-    """Route-specific debug — identical visualisation to astar_proj (anchors + planned route)."""
-    return astar_proj.save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=camera)
+def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=None, overlay=None):
+    """Route-specific debug — identical visualisation to astar_proj (anchors + planned route).
+
+    `overlay` (the pre-rendered inflation overlay) is passed straight through; see astar_proj.
+    """
+    return astar_proj.save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params,
+                                 camera=camera, overlay=overlay)

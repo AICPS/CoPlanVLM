@@ -11,9 +11,12 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description():
     pkg_dir = str(get_package_share_directory('coplan_vlm'))
     grid_csv_path = pkg_dir + '/config/grid_cell_centers.csv'
-    # Debug artifacts dir, resolved relative to this package (a `debug/` folder at the package
-    # root, alongside launch/ and config/). Same __file__-relative pattern as config/.env below.
-    debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'debug'))
+    # Debug artifacts go to the WORKSPACE debug/ dir (not the install share tree), one directory
+    # per environment so a sim run and a lab run never overwrite each other. Four levels up from
+    # <ws>/install/coplan_vlm/share/coplan_vlm is the workspace root — same traversal map_gen uses
+    # for the shared occupancy snapshot.
+    ws_root = os.path.normpath(os.path.join(pkg_dir, '..', '..', '..', '..'))
+    debug_dir = os.path.join(ws_root, 'debug', 'gazebo_sim')
 
     # Load environment variables from .env
     env_path = os.path.join(os.path.dirname(__file__), '..', 'config/.env')
@@ -43,6 +46,9 @@ def generate_launch_description():
                 {'replan_period': ParameterValue(
                     LaunchConfiguration('replan_period'), value_type=float)},
                 {'camera': 'gazebo'},
+                # Same dir the translator writes its images to, so the VLM prompt/response land
+                # beside that run's artifacts.
+                {'debug_dir': debug_dir},
             ],
             remappings=[
                 ('/camera_image', '/ids_overhead/image'),
@@ -140,18 +146,6 @@ def generate_launch_description():
     #     name='joy_node'
     # )
 
-    # Data recording node (optional)
-    # Start only when pressed button 2 on joystick
-    logger_node = GroupAction([
-        Node(
-            package='coplan_vlm',
-            executable='node_Trajectory_Logger',
-            name='node_Trajectory_Logger',
-            output='screen',
-            emulate_tty=True,
-        ),
-    ])
-
     # Path visualizer node
     path_visualizer_node = Node(
         package='coplan_vlm',
@@ -161,7 +155,6 @@ def generate_launch_description():
         emulate_tty=True,
         parameters=[
             {'grid_csv': grid_csv_path},
-            {'map_path': pkg_dir + '/map_raw.png'},
             {'save_overlays': True},
             {'line_thickness': 8},
             {'circle_radius': 16},
@@ -191,5 +184,4 @@ def generate_launch_description():
         path_translator_node,
         # joy_node,   # disabled — see commented joy_node definition above
         path_visualizer_node,
-        # logger_node,
     ])

@@ -17,6 +17,12 @@ generate_prompt composes the planner prompt from independent, swappable pieces, 
 
 A single ``map_overlay_type`` selects BOTH the description text (piece 2) and the map_gen renderer that
 draws the image, so the prompt and the image stay in lock-step.
+
+Both calls are constrained by strict JSON schemas built here (``classifier_schema`` /
+``route_schema``), and ``TASK_ROUTING`` maps the classifier's answer onto the model output key and the
+downstream planner. Prompt text, overlay image, reply schema and planner routing therefore all live in
+this one module — the live node (exec.py) and the offline harness (scripts/test_pipeline.py) import
+them rather than restating them, so the two can never drift.
 """
 
 from __future__ import annotations
@@ -29,6 +35,22 @@ from node_Executive_API.map_gen import (
 # ── Axis vocabularies (the only valid controller / overlay names) ──────────────
 CONTROLLERS       = ("nav2point", "maneuver", "coverage")
 MAP_OVERLAY_TYPES = ("points", "marked_obs", "battleship")
+
+# The overlay production uses for every controller. Lives here (not in exec.py) because the path
+# translator also needs it: it renders vlm_selections.png in the style matching the overlay the VLM
+# actually saw, and /vlm_plan does not carry the overlay type.
+PRODUCTION_MAP_OVERLAY = "marked_obs"
+
+# Task type -> (model output key, downstream planner name published on /vlm_plan).
+# nav2point / maneuver return ordered "waypoints" routed through A*; coverage returns an unordered
+# "regions" cell set routed through the coverage (TSP) planner. node_Path_Translator resolves the
+# planner name via its own _PLANNERS table, so this is the single hand-off contract between the
+# Executive and the translator.
+TASK_ROUTING = {
+    "nav2point": ("waypoints", "astar"),
+    "maneuver":  ("waypoints", "astar"),
+    "coverage":  ("regions",   "coverage"),
+}
 
 
 # ── 1. Shared preamble (every prompt) ──────────────────────────────────────────
@@ -321,6 +343,57 @@ def generate_prompt(instruction, controller, map_overlay_type, *,
             cot_block = cot_block.replace("%RED_MARKER_STEP%\n", red)
         parts.append(cot_block)
     return "\n\n".join(parts), image_b64
+
+
+# ── Reply schemas (Responses API structured outputs) ───────────────────────────
+
+def route_schema(result_key, robot_names, cot, allowed_labels=None):
+    """Strict JSON Schema for the PLANNER reply — enforced via Responses API structured outputs.
+
+    Always: {result_key: {<robot>: [labels] for each robot}}. additionalProperties:false + a fixed
+    robot roster means the model CANNOT emit extra keys (e.g. a "raph_donnie" shared route) — the
+    structure is guaranteed by constrained decoding, not by asking in the prompt.
+
+    When allowed_labels is given, every waypoint is constrained to that enum (the free/blue-dot cells),
+    so the model physically CANNOT select an obstacle cell — obstacle avoidance enforced at decode time,
+    not merely requested in the prompt. Callers currently leave it unset and let the planner project
+    picks onto free cells instead (see map_gen.free_cell_labels to re-enable).
+
+    When cot=True a leading free-text "reasoning" string field is added. Structured outputs fill
+    properties in declaration order, so the model writes its full reasoning trace FIRST and the routes
+    are conditioned on it — real chain-of-thought, in one call, with the answer keys still locked.
+    """
+    item_schema = {"type": "string"}
+    if allowed_labels:
+        item_schema = {"type": "string", "enum": list(allowed_labels)}
+    route_obj = {
+        "type": "object", "additionalProperties": False,
+        "required": list(robot_names),
+        "properties": {name: {"type": "array", "items": item_schema} for name in robot_names},
+    }
+    properties: dict = {}
+    required: list = []
+    if cot:                                    # declared first -> generated (reasoned) first
+        properties["reasoning"] = {"type": "string"}
+        required.append("reasoning")
+    properties[result_key] = route_obj
+    required.append(result_key)
+    return {"type": "object", "additionalProperties": False,
+            "required": required, "properties": properties}
+
+
+def classifier_schema():
+    """Strict JSON Schema for the CLASSIFIER reply: exactly one of CONTROLLERS.
+
+    The enum makes an out-of-vocabulary task type impossible at decode time, rather than something
+    callers detect and reject afterwards. CONTROLLERS is the single source of the vocabulary, so
+    adding a controller extends the classifier automatically.
+    """
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": ["task_type"],
+        "properties": {"task_type": {"type": "string", "enum": list(CONTROLLERS)}},
+    }
 
 
 # ── Classifier prompt ──────────────────────────────────────────────────────────

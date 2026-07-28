@@ -5,6 +5,11 @@ Operates purely on an int8 occupancy grid as produced by obs_seg.occupancy
 where the robot can be treated as a point.
 
 Cells are (gx, gy) = (column, row); grid is indexed grid[gy, gx].
+
+Lives inside node_Path_Translator, not at the top of nodes/, because its only consumers are
+this package's planners (astar_proj, coverage_proj); the top level is reserved for libraries
+genuinely shared across nodes (coord_transform, obs_seg, debug_io). Public API:
+``from .grid_planner_utils import astar, line_of_sight, project_to_free, simplify_path_los``.
 """
 from __future__ import annotations
 

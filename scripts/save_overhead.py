@@ -12,7 +12,7 @@ Output:
     <out>/overhead.png   — BGR image from /ids_overhead/image (typically 1936x1216)
     <out>/poses.json     — {"raph": {"x": ..., "y": ...}, "donnie": {"x": ..., "y": ...}}
                            Raw Gazebo coordinates as received on /<robot>/ned/pose_stamped.
-                           test_pipeline.py applies gazebo_to_world() to match translate.py.
+                           test_pipeline.py applies gazebo_to_world() to match translator_node.py.
 """
 from __future__ import annotations
 

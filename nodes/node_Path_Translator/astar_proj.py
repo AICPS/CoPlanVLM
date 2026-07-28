@@ -1,13 +1,13 @@
-"""A* projection planner — the original translate.py path method, extracted as a module.
+"""A* projection planner — the original translator_node.py path method, extracted as a module.
 
 Method: project each reference point (robot pose + VLM centroids) onto the nearest FREE cell of
 the INFLATED occupancy grid, then pairwise A* between consecutive anchors with line-of-sight
-thinning. Reuses grid_planner + obs_seg.occupancy verbatim.
+thinning. Reuses grid_planner_utils + obs_seg.occupancy verbatim.
 
 Pluggable planner interface (shared with coverage_proj):
     build_reference(labels, pose_xy, grid_px, camera) -> (ref, unknown)
     plan(reference_xy, ctx, meta, params) -> (world_path, debug)
-    save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params) -> None
+    save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera, overlay) -> None
 
 The planning grid is inflated upstream (exec.run_segmentation / test_pipeline), so ctx is simply
 {"infl": <inflated grid>} built by the caller — this module never inflates.
@@ -19,12 +19,10 @@ import os
 from typing import List
 
 import cv2
-import numpy as np
 
 from coord_transform import pixel_to_world, world_to_pixel
-from obs_seg import FREE, OCCUPIED
 from obs_seg.occupancy import world_to_cell, cell_to_world, render_inflation_overlay
-from grid_planner import project_to_free, astar, simplify_path_los
+from .grid_planner_utils import project_to_free, astar, simplify_path_los
 
 
 PARAMS: dict = {
@@ -40,7 +38,7 @@ def _p(params, key):
 def build_reference(labels, pose_xy, grid_px, camera=None):
     """Convert a label list to a world-frame reference route.
 
-    Shared between translate.py and test_pipeline.py — the single implementation of
+    Shared between translator_node.py and test_pipeline.py — the single implementation of
     centroid-label -> world-coordinate conversion.
 
     Args:
@@ -137,8 +135,14 @@ def _i(uv):
     return (int(round(uv[0])), int(round(uv[1])))
 
 
-def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=None):
-    """Route-specific debug: route_centroids, route_planned, occ_inflated, inflation_overlay."""
+def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=None, overlay=None):
+    """Per-robot route debug: route_centroids.png and route_planned.png.
+
+    `overlay` is the rendered inflation overlay used as the canvas for route_planned.png. It is
+    robot-independent, so callers render it ONCE per plan and pass it in for every robot; the
+    caller also writes it (debug_io.save_inflation_overlay) — this function does not. When it is
+    None the overlay is rendered here, which keeps the function usable stand-alone.
+    """
     infl = ctx["infl"]
     base = base_bgr
     ref = debug.get("reference_xy", [])
@@ -149,7 +153,8 @@ def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=None):
     # Inflation overlay from the single shared renderer (occupancy.render_inflation_overlay). `grid`
     # is the post-override, pre-inflation occupancy (callers pass the `cleared` grid), so red = true
     # obstacle and yellow = inflation margin. The planned route is drawn on top of this overlay below.
-    overlay = render_inflation_overlay(base, grid, infl, meta, camera)
+    if overlay is None:
+        overlay = render_inflation_overlay(base, grid, infl, meta, camera)
 
     # Naive route through the reference centroids (orange line, blue dots).
     rc = base.copy()
@@ -174,15 +179,3 @@ def save_debug(out_dir, base_bgr, grid, meta, ctx, debug, params, camera=None):
         cv2.circle(rp, _i(world_to_pixel(start_world[0], start_world[1], camera=camera)), 12,
                    (255, 0, 255), -1, lineType=cv2.LINE_AA)
     cv2.imwrite(os.path.join(out_dir, "route_planned.png"), rp)
-
-    # Inflated occupancy map (white=free, black=occupied, gray=unknown), reoriented to match image.
-    def viz(gmap):
-        g2 = np.flipud(gmap.T)
-        out = np.full((*g2.shape, 3), 128, np.uint8)
-        out[g2 == FREE] = (255, 255, 255)
-        out[g2 == OCCUPIED] = (0, 0, 0)
-        return out
-    cv2.imwrite(os.path.join(out_dir, "occ_inflated.png"), viz(infl))
-
-    # Clean inflation overlay (no route) from the shared renderer.
-    cv2.imwrite(os.path.join(out_dir, "inflation_overlay.png"), overlay)

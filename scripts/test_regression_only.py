@@ -20,10 +20,10 @@ Usage (from workspace root):
         --prompt "Send raph to the chair and donnie to the box"
 
 Output (written to --out, default debug/regression_only/):
-    vlm_overlay.png       — the unmarked image (robot markers only) sent to the VLM
-    robot_paths.png       — both robots' planned (A*) trajectories on the clean overhead image
-  and per robot in <out>/<robot>/: raw_overhead, segmentation, occ_true, vlm_selections (numbered points),
-    route_centroids, route_planned, occ_inflated, inflation_overlay.
+    marks_overlay.png     — the unmarked image (robot markers only) sent to the VLM
+    robot_paths_waypoints.png — both robots' planned (A*) trajectories + their numbered pixel picks
+    raw_overhead.png, inflation_overlay.png — identical for every robot, so written once here
+  and per robot in <out>/<robot>/: vlm_selections (numbered points), route_centroids, route_planned.
 """
 from __future__ import annotations
 
@@ -39,9 +39,11 @@ import cv2
 import numpy as np
 from PIL import Image as PILImage, ImageDraw
 
+import debug_io
 from coord_transform import gazebo_to_world, gazebo_to_ned, ned_to_world, pixel_to_world
 from obs_seg.segmenter import TraversabilitySegmenter
-from obs_seg.occupancy import mask_to_occupancy, create_filtered_occupancy_map, RESOLUTION as _RESOLUTION
+from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
+                               render_inflation_overlay, RESOLUTION as _RESOLUTION)
 from node_Path_Translator import astar_proj
 from node_Path_Translator.astar_proj import PARAMS as ASTAR_PARAMS
 from node_Executive_API import map_gen
@@ -117,26 +119,25 @@ def _points_to_reference(points: list, pose_xy, camera: str) -> tuple[list, list
 
 # ── VLM call (single call; text + unmarked image; plain JSON, like the baseline node) ──
 
-def _call_regression_vlm(prompt: str, overlay: PILImage.Image, w: int, h: int, model: str,
+def _call_regression_vlm(prompt: str, map_b64: str, w: int, h: int, model: str,
                          temperature: float, out_dir: str | None = None) -> tuple[dict, dict]:
     """system instructions = REGRESSION_PROMPT (image dims filled in), user content = [operator prompt
     text, unmarked overlay image]. Plain JSON reply (no structured schema).
+
+    `map_b64` is the base64 PNG of the overlay, encoded by the caller so the same bytes go to both
+    the API and debug_io.save_marks_overlay.
 
     Returns (routes, usage) where routes = {robot: [[x, y], ...]} pixel points and usage is token counts.
     """
     instructions = REGRESSION_PROMPT.format(w=w, h=h)
 
-    buf = io.BytesIO()
-    overlay.save(buf, format="PNG")
-    map_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
     print("─" * 16 + " VLM full prompt (system instructions) " + "─" * 16)
     print(instructions)
     print(f'\nOperator instruction: "{prompt}"')
     print("─" * 71)
-    if out_dir is not None:
-        with open(os.path.join(out_dir, "vlm_prompt.txt"), "w") as f:
-            f.write(instructions + f'\n\nOperator instruction: "{prompt}"')
+    # This baseline sends the operator text as a separate user turn, so record it with the system
+    # instructions to keep vlm_prompt.txt a complete picture of what the model was given.
+    saved_prompt = instructions + f'\n\nOperator instruction: "{prompt}"'
 
     client = tp._openai_client()
     print(f"Planning with {model}…")
@@ -159,8 +160,7 @@ def _call_regression_vlm(prompt: str, overlay: PILImage.Image, w: int, h: int, m
 
     raw = response.output_text.strip()
     if out_dir is not None:
-        with open(os.path.join(out_dir, "vlm_response.txt"), "w") as f:
-            f.write(raw)
+        debug_io.save_vlm_exchange(out_dir, saved_prompt, raw)
 
     result = tp._parse_json_reply(raw)
     if result is None:
@@ -234,18 +234,36 @@ def main() -> None:
     infl, cleared = create_filtered_occupancy_map(grid, meta, world_poses, return_cleared=True)
     ctx = {"infl": infl}
 
+    # Robot-independent debug artifacts: rendered and written ONCE per run at the top level
+    # (they are identical for every robot). `infl_overlay` is reused below as each robot's
+    # route_planned.png canvas, so render_inflation_overlay runs only this once.
+    os.makedirs(args.out, exist_ok=True)
+    infl_overlay = render_inflation_overlay(img_bgr, cleared, infl, meta, camera)
+    debug_io.save_raw_overhead(args.out, img_bgr)
+    debug_io.save_inflation_overlay(args.out, infl_overlay)
+
     # ── Unmarked overlay (robot name markers only) ────────────────────────
     overlay = _render_robots_only(pil_rgba, robot_poses_ned, camera)
-    overlay.convert("RGB").save(os.path.join(args.out, "vlm_overlay.png"))
+    # Encode once: the same bytes go to the API and to marks_overlay.png.
+    _buf = io.BytesIO()
+    overlay.save(_buf, format="PNG")
+    map_b64 = base64.b64encode(_buf.getvalue()).decode("utf-8")
+    debug_io.save_marks_overlay(args.out, map_b64)
 
     # ── Single VLM call ───────────────────────────────────────────────────
-    routes, usage = _call_regression_vlm(args.prompt, overlay, w, h, args.model, args.temperature,
+    routes, usage = _call_regression_vlm(args.prompt, map_b64, w, h, args.model, args.temperature,
                                          out_dir=args.out)
 
     # ── Plan per robot through the VLM's raw pixel points (astar) ─────────
     params = dict(ASTAR_PARAMS)
     path_lengths: dict[str, float] = {}
     world_paths: dict[str, list] = {}
+    # Accumulated selections for the combined figure. This baseline's "labels" are just ordinals,
+    # so they are numbered CONTINUOUSLY across robots (raph 1..n, donnie n+1..m) — per-robot
+    # restarts would collide in the shared label->pixel dict and mis-place donnie's markers.
+    sel_routes: dict[str, list] = {}
+    sel_px: dict[str, tuple] = {}
+    next_id = 1
     for name, points in routes.items():
         if not isinstance(points, list):
             print(f"[{name}] route is not a list; skipping.", file=sys.stderr)
@@ -282,21 +300,24 @@ def main() -> None:
 
         out_dir = os.path.join(args.out, name)
         os.makedirs(out_dir, exist_ok=True)
-        tp._save_common_debug(out_dir, img_bgr, pix_labels, grid)
-        # Reuse _save_vlm_selections' point style: ordinal labels + a pixel dict keyed by them.
+        # Reuse save_vlm_selections' point style: ordinal labels + a pixel dict keyed by them.
         valid_pts = [p for p in points if isinstance(p, (list, tuple)) and len(p) >= 2]
-        labels = [str(i + 1) for i in range(len(valid_pts))]
-        grid_px = {str(i + 1): (float(p[0]), float(p[1])) for i, p in enumerate(valid_pts)}
-        tp._save_vlm_selections(out_dir, img_bgr, "points", labels, grid_px)
+        labels = [str(next_id + i) for i in range(len(valid_pts))]
+        grid_px = {lbl: (float(p[0]), float(p[1])) for lbl, p in zip(labels, valid_pts)}
+        next_id += len(valid_pts)
+        sel_routes[name] = labels
+        sel_px.update(grid_px)
+        debug_io.save_vlm_selections(out_dir, img_bgr, "points", labels, grid_px)
         dbg["start_world"] = pose_xy
-        astar_proj.save_debug(out_dir, img_bgr, cleared, meta, ctx, dbg, params, camera=camera)
+        astar_proj.save_debug(out_dir, img_bgr, cleared, meta, ctx, dbg, params, camera=camera,
+                              overlay=infl_overlay)
         print(f"[{name}] Debug images -> {out_dir}/")
 
     # ── Combined trajectory plot ──────────────────────────────────────────
     if world_paths:
-        paths_png = os.path.join(args.out, "robot_paths.png")
-        tp._save_robot_paths(paths_png, img_bgr, world_paths, camera)
-        print(f"Combined robot paths -> {paths_png}")
+        wp_png = os.path.join(args.out, "robot_paths_waypoints.png")
+        debug_io.save_paths_with_waypoints(wp_png, img_bgr, world_paths, sel_routes, sel_px, camera)
+        print(f"Combined robot paths + VLM points -> {wp_png}")
 
     # ── Evaluation summary ────────────────────────────────────────────────
     print("─" * 27 + " Evaluation " + "─" * 27)

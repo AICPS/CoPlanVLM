@@ -39,15 +39,13 @@ setup(
     maintainer_email='davidrm3@uci.edu',
     description='TurtleBot control w/ OpenAI (adaptive Executive path planner)',
     license='Apache-2.0',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'node_Executive_API = node_Executive_API.exec:main',
             'node_Control = node_Control.control:main',
-            'node_Path_Translator = node_Path_Translator.translate:main',
+            'node_Path_Translator = node_Path_Translator.translator_node:main',
             'node_Path_Visualizer = node_Path_Visualizer.path_visualizer:main',
-            'node_Trajectory_Logger = node_Path_Translator.logger_node:main',
-            'node_Odometry_To_Pose = node_Path_Translator.odom_to_pose:main',
+            'node_Odometry_To_Pose = node_Odometry_To_Pose.odom_to_pose:main',
             'obs_seg_cli = obs_seg.cli:main',
         ],
     },
