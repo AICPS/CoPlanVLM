@@ -36,7 +36,7 @@ def generate_launch_description():
 
     # Define Robot's Name
     bot_name = 'raph'
-    bot2_name = 'donnie'   # second robot (blue hat); stubbed control on /donnie/* topics
+    bot2_name = 'donnie'   # second robot stubbed control on /donnie/* topics
 
     # Executive API node, OpenAI pathing
     exec_api_node = GroupAction([

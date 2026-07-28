@@ -67,7 +67,7 @@ from node_Path_Translator.coverage_proj import PARAMS as COVERAGE_PARAMS
 
 from node_Executive_API.prompt_gen import (
     generate_prompt, route_schema, classifier_schema,
-    CONTROLLERS, MAP_OVERLAY_TYPES, TASK_ROUTING, CLASSIFIER_SYSTEM_PROMPT)
+    CONTROLLERS, MAP_OVERLAY_TYPES, TASK_ROUTING, classifier_prompt)
 from node_Executive_API.map_gen import (
     _N_COLS as _GRID_COLS, _N_ROWS as _GRID_ROWS,
     _DOT_RADIUS, _LABEL_SIZE, _ROBOT_COLORS, _ROBOT_RADIUS)
@@ -130,17 +130,18 @@ def _openai_client():
 
 
 # Default controller selector: runs when --planner is omitted (manual --planner skips it).
-def _classify(prompt: str, model: str, temperature: float) -> str:
+def _classify(prompt: str, model: str, temperature: float, robot_names) -> str:
     """First call: text-only classifier -> controller (one of CONTROLLERS).
 
     Constrained by classifier_schema() (enum over CONTROLLERS), so the model cannot return a task
-    type outside the vocabulary — same call exec._classify_task() makes.
+    type outside the vocabulary — same call exec._classify_task() makes. `robot_names` names the
+    robots in the classifier prompt, matching the roster used for the planner call.
     """
     client = _openai_client()
     print(f"Classifying instruction with {model}…")
     response = client.responses.create(
         model=model, temperature=temperature,
-        instructions=CLASSIFIER_SYSTEM_PROMPT,
+        instructions=classifier_prompt(robot_names),
         input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
         text={"format": {"type": "json_schema", "name": "task_classification",
                          "strict": True, "schema": classifier_schema()}},
@@ -317,7 +318,7 @@ def main() -> None:
     if args.planner:                       # manual controller
         task_type = args.planner
     else:                                  # classifier picks the controller (first LLM call)
-        task_type = _classify(args.prompt, args.model, args.temperature)
+        task_type = _classify(args.prompt, args.model, args.temperature, list(robot_poses_ned))
         print(f"Classifier chose controller: {task_type}")
 
     map_overlay = args.map_overlay or "marked_obs"   # default overlay for every controller
@@ -347,7 +348,7 @@ def main() -> None:
     instructions, map_b64 = generate_prompt(
         args.prompt, task_type, map_overlay,
         pil_img=pil_rgba, occ_grid=infl, occ_meta=meta, camera=camera,
-        robot_poses=robot_poses_ned, cot=cot)
+        robot_poses=robot_poses_ned, cot=cot, robot_names=list(robot_poses_ned))
     # Byte-exact copy of the image sent to the VLM (no decode/re-encode).
     debug_io.save_marks_overlay(args.out, map_b64)
     # Waypoints are left unconstrained (no enum) — the schema still locks the route shape/keys, but the

@@ -54,7 +54,7 @@ from node_Executive_API.prompt_gen import (
     CONTROLLERS,
     TASK_ROUTING,
     PRODUCTION_MAP_OVERLAY,
-    CLASSIFIER_SYSTEM_PROMPT,
+    classifier_prompt,
 )
 from node_Executive_API.map_gen import run_segmentation, _node_to_pil
 
@@ -239,10 +239,13 @@ class ExecutiveApiNode(Node):
             # generate_prompt assembles the system prompt AND renders the matching overlay image,
             # so the two always agree. cot=True appends the controller's chain-of-thought scaffold;
             # the schema below makes the model fill in its "reasoning" before the routes.
+            # robot_names is the SAME roster passed to route_schema below, so the prompt names
+            # exactly the robots the reply schema will accept.
             system_prompt, map_b64 = generate_prompt(
                 self.current_prompt, self.current_task_type, PRODUCTION_MAP_OVERLAY,
                 pil_img=_node_to_pil(self), occ_grid=self.occ_grid, occ_meta=self.occ_meta,
-                camera=self.camera_name, robot_poses=self.robot_poses, cot=True)
+                camera=self.camera_name, robot_poses=self.robot_poses, cot=True,
+                robot_names=self.robot_names)
 
             # Structured outputs: the reply can only be the fixed {reasoning, result_key{robots…}}
             # shape, so invented keys / missing robots are impossible at decode time. Waypoints are
@@ -362,7 +365,7 @@ class ExecutiveApiNode(Node):
             response = self.client.responses.create(
                 model=self.model,
                 temperature=self.temperature,
-                instructions=CLASSIFIER_SYSTEM_PROMPT,
+                instructions=classifier_prompt(self.robot_names),
                 input=[
                     {
                         "role": "user",

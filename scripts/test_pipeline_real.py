@@ -115,7 +115,7 @@ def main() -> None:
     if args.planner:                       # manual controller
         task_type = args.planner
     else:                                  # classifier picks the controller (first LLM call)
-        task_type = tp._classify(args.prompt, args.model, args.temperature)
+        task_type = tp._classify(args.prompt, args.model, args.temperature, list(robot_poses_ned))
         print(f"Classifier chose controller: {task_type}")
 
     map_overlay = args.map_overlay or "marked_obs"   # default overlay for every controller
@@ -143,7 +143,7 @@ def main() -> None:
     instructions, map_b64 = tp.generate_prompt(
         args.prompt, task_type, map_overlay,
         pil_img=pil_rgba, occ_grid=infl, occ_meta=meta, camera=camera,
-        robot_poses=robot_poses_ned, cot=cot)
+        robot_poses=robot_poses_ned, cot=cot, robot_names=list(robot_poses_ned))
     # Byte-exact copy of the image sent to the VLM (no decode/re-encode).
     debug_io.save_marks_overlay(args.out, map_b64)
     routes, usage = tp._call_planner_vlm(instructions, map_b64, result_key, args.model, args.temperature,

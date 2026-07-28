@@ -11,7 +11,10 @@ torch
 torchvision
 transformers
 opencv-python
-numpy
+# MUST stay on 1.x. ROS 2 Humble's C extensions (cv_bridge in particular) are compiled against
+# numpy 1.x, and numpy 2.0 changed the C ABI — mixing them fails at import with
+# "_ARRAY_API not found" / "numpy.dtype size changed". Verified on this repo.
+numpy<2
 
 # Planning / imaging / plotting used across the nodes and scripts
 matplotlib      # scripts/plot_success_rates.py

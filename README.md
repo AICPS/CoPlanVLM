@@ -227,9 +227,17 @@ only to translate Gazebo odometry to the NED frame.
 
 ### 1. Bring up the Mocap room
 
+ADD ANY ADDITIONAL STEPS for making both publish without errors
+
 ```bash
 ros2 run ros_vrpn_client ros_vrpn_client --ros-args -r __node:=donnie -p vrpn_ip:="192.168.1.104" -p my_int:=3883
 ```
+
+```bash
+ros2 run ros_vrpn_client ros_vrpn_client --ros-args -r __node:=raph -p vrpn_ip:="192.168.1.104" -p my_int:=3883
+```
+
+
 
 ### 2. Launch the ueye client:
 ```bash

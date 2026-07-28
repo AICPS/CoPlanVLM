@@ -54,6 +54,10 @@ _ROBOT_COLORS  = [                  # per-robot colors (RGB), cycled by index
     (255, 140,   0),  # orange   – robot 2
     (  0, 200,  80),  # green    – robot 3
 ]
+# Human-readable names for _ROBOT_COLORS, SAME ORDER. prompt_gen tells the VLM which colour marker
+# belongs to which robot, so these must stay index-aligned with the tuples above — otherwise the
+# prompt would describe a colour the image does not draw.
+ROBOT_COLOR_NAMES = ("magenta", "light blue", "orange", "green")
 _SEG_PROMPTS   = ["the floor"]
 _SEG_THRESHOLD = 0.48
 

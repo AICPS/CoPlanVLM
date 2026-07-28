@@ -2,7 +2,7 @@
 
 Each operator instruction goes through two LLM calls:
 
-1. CLASSIFIER (CLASSIFIER_SYSTEM_PROMPT) — text-only; tags the instruction with a controller
+1. CLASSIFIER (classifier_prompt(robot_names)) — text-only; tags the instruction with a controller
    ("nav2point", "maneuver", or "coverage").
 
 2. PLANNER (generate_prompt(...)) — vision call; returns the assembled system prompt AND the overlay
@@ -23,13 +23,19 @@ Both calls are constrained by strict JSON schemas built here (``classifier_schem
 downstream planner. Prompt text, overlay image, reply schema and planner routing therefore all live in
 this one module — the live node (exec.py) and the offline harness (scripts/test_pipeline.py) import
 them rather than restating them, so the two can never drift.
+
+ROBOT NAMES: every prompt piece is a template whose robot names are %ROBOT_A% / %ROBOT_B% sentinels,
+filled per call from the ``robot_names`` roster the caller passes (exec's ROS parameter, i.e. the
+launch file's bot_name / bot2_name). The same roster drives ``route_schema``, so the prompt always
+describes exactly the robots the reply schema accepts, and renaming a robot is a launch-file edit.
+Exactly two robots are supported — anything else raises rather than silently mis-prompting.
 """
 
 from __future__ import annotations
 
 from node_Executive_API.map_gen import (
     render_grid_points_map, render_obstacle_marked_map, render_battleship_map,
-    blocked_cell_labels, _to_b64)
+    blocked_cell_labels, _to_b64, ROBOT_COLOR_NAMES)
 
 
 # ── Axis vocabularies (the only valid controller / overlay names) ──────────────
@@ -60,8 +66,7 @@ You are a path-planning agent for two TurtleBot4 robots sharing one workspace.
 You will be shown an overhead camera image of the environment with a map overlay.
 
 The two robots — identify each by its appearance in the image:
-- "raph"   — the round black TurtleBot labeled "raph" with magenta in the image.
-- "donnie" — the round black TurtleBot labeled "donnie" in light blue in the image.
+%ROBOT_ROSTER%
 
 Locate each robot in the image before planning. General rules that apply to all tasks:
 - You MUST include BOTH robots in every response, even if the instruction only mentions one.
@@ -135,10 +140,10 @@ not, as an A* path planner will route each robot to the goal locations. Output o
 for each robot in order — do not list intermediate steps. A robot with no task should have an empty list.
 
 OUTPUT FORMAT (exactly one JSON object):
-{"waypoints": {"raph": ["<goal_point>", ...], "donnie": ["<goal_point>", ...]}}
+{"waypoints": {"%ROBOT_A%": ["<goal_point>", ...], "%ROBOT_B%": ["<goal_point>", ...]}}
 
-Example — if the instruction is "Send raph to the chair and then the person. Have donnie stay in place.", a valid response is:
-{"waypoints": {"raph": ["C4", "H8"], "donnie": []}}"""
+Example — if the instruction is "Send %ROBOT_A% to the chair and then the person. Have %ROBOT_B% stay in place.", a valid response is:
+{"waypoints": {"%ROBOT_A%": ["C4", "H8"], "%ROBOT_B%": []}}"""
 
 _MANEUVER_EXPLAIN = """\
 YOUR TASK:
@@ -148,26 +153,26 @@ avoidance corridors, formations, etc.). Step between locations that are adjacent
 a coherent path.
 
 OUTPUT FORMAT (exactly one JSON object):
-{"waypoints": {"raph": ["<point>", ...], "donnie": ["<point>", ...]}}
+{"waypoints": {"%ROBOT_A%": ["<point>", ...], "%ROBOT_B%": ["<point>", ...]}}
 
 Example — if the instruction is "Have the robots do a loop around the chair", a valid response is:
-{"waypoints": {"raph": ["A7", "B6", "C5", "D4", "D3", "C3", "B3", "B4", "B5", "B6", "A7"],
-              "donnie": ["D3", "D4", "D5", "C5", "B5", "B4", "B3", "C3", "D2"]}}"""
+{"waypoints": {"%ROBOT_A%": ["A7", "B6", "C5", "D4", "D3", "C3", "B3", "B4", "B5", "B6", "A7"],
+              "%ROBOT_B%": ["D3", "D4", "D5", "C5", "B5", "B4", "B3", "C3", "D2"]}}"""
 
 _COVERAGE_EXPLAIN = """\
 YOUR TASK:
 Select the locations each robot should visit to cover or patrol the area described in the instruction,
 choosing from the labeled locations shown in the overlay. You choose which to cover. If no robot is
-specified, split coverage roughly equally between raph and donnie. If only one robot is specified,
+specified, split coverage roughly equally between %ROBOT_A% and %ROBOT_B%. If only one robot is specified,
 return an empty list for the other. The order does not matter — a lower-level controller will find the
 most efficient patrol route.
 
 OUTPUT FORMAT (exactly one JSON object):
-{"regions": {"raph": ["<cell>", ...], "donnie": ["<cell>", ...]}}
+{"regions": {"%ROBOT_A%": ["<cell>", ...], "%ROBOT_B%": ["<cell>", ...]}}
 
 Example — if the instruction is "Have the robots patrol the left side of the map", a valid response is:
-{"regions": {"raph": ["A5", "A6", "A7", "A8", "B5", "B6", "B7", "B8", "C5", "C6", "C7", "C8", "D5", "D6", "D7", "D8", "E5", "E6", "E7", "E8"],
-             "donnie": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4", "E1", "E2", "E3", "E4"]}}"""
+{"regions": {"%ROBOT_A%": ["A5", "A6", "A7", "A8", "B5", "B6", "B7", "B8", "C5", "C6", "C7", "C8", "D5", "D6", "D7", "D8", "E5", "E6", "E7", "E8"],
+             "%ROBOT_B%": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4", "E1", "E2", "E3", "E4"]}}"""
 
 CONTROLLER_EXPLAIN = {
     "nav2point": _NAV2POINT_EXPLAIN,
@@ -193,15 +198,15 @@ CoT REASONING STEPS — Before choosing routes, work through these in the "reaso
 3) For each desired point, check whether its cell is blocked (Check the the list of blocked points in the MAP_OVERLAY)): 
    if it is blocked, list the direction the robot should be relative to the obstacle, 
    then the nearest FREE (blue-dot) point the robot can stand on in that direction;
-   if the desired point is already free, use it as-is. Also note which robot (raph or donnie) is currently nearest to
-   that cell (e.g. "green box E8 is blocked -> travel to D6, nearest robot donnie").
+   if the desired point is already free, use it as-is. Also note which robot (%ROBOT_A% or %ROBOT_B%) is currently nearest to
+   that cell (e.g. "green box E8 is blocked -> travel to D6, nearest robot %ROBOT_B%").
 """
 
 _COVERAGE_COT = """\
 REASONING — Before deciding the routes, work through the task in the "reasoning" field, in this order:
 1. RELEVANT OBJECTS: Identify the objects/regions named in the operator's instruction. 
    List where they are located on the map (e.g. "chair: C4", "yellow box: H8"). 
-   List where each robot is on the map initially (e.g. "raph: A7", "donnie: D2").
+   List where each robot is on the map initially (e.g. "%ROBOT_A%: A7", "%ROBOT_B%: D2").
 2. SELECT_REGIONS: List all regions that the robots should cover/visit.
 3. ROBOT ASSIGNMENT: Divide the regions evenly between the two robots.
 Only after this reasoning, fill in the route object with your final choice."""
@@ -243,14 +248,14 @@ waypoints that define the maneuver's shape — do NOT list every adjacent cell o
 obstacles (skipping cells is expected).
 
 1) Identify and locate the robots and key objects in the scene.
-   a) Robots: give raph's and donnie's current position as the labeled grid point nearest each robot
-      in the image (e.g. "raph: A7", "donnie: D2").
+   a) Robots: give %ROBOT_A%'s and %ROBOT_B%'s current position as the labeled grid point nearest each robot
+      in the image (e.g. "%ROBOT_A%: A7", "%ROBOT_B%: D2").
    b) Task features: list everything the instruction requires you to perceive to carry out the task —
       not only goal objects, but also boundaries or lines to avoid/not cross (e.g. caution tape),
       regions to stay within or out of, and landmarks to go around. Give the grid label(s) each one
       occupies or spans (e.g. "yellow box: H8", "caution tape: E4-E7", "chair to loop: C4").
 %RED_MARKER_STEP%
-2) Split the instruction into one subtask per robot, naming which robot (raph or donnie) performs each.
+2) Split the instruction into one subtask per robot, naming which robot (%ROBOT_A% or %ROBOT_B%) performs each.
    Keep every spatial constraint and landmark named in the instruction — words like behind / around /
    left of / between / via and the object they refer to. Do not shorten or drop these. If only one
    robot is needed, write "stay" for the other.
@@ -266,7 +271,7 @@ obstacles (skipping cells is expected).
    waypoints on several DIFFERENT sides of it (not just the far side), so the route encircles the object
    instead of going out and doubling back the same way:
       leg 1 <purpose>: <label(s)>   ...   leg N <purpose>: <label(s)>
-   Example — "raph: loop around the chair at C4 and return to its start at A7":
+   Example — "%ROBOT_A%: loop around the chair at C4 and return to its start at A7":
       leg 1 approach the chair: C5 ; leg 2 circle it via each side: D4, C3, B4, C5 ;
       leg 3 return to start: A7
 6) Assemble each robot's route as a SHORT ordered list of the key waypoints from step 5 (start -> legs
@@ -289,10 +294,89 @@ def _operator_line(instruction: str) -> str:
     return f'The operator\'s instruction is: "{instruction}"'
 
 
+# ── Robot-name substitution ────────────────────────────────────────────────────
+# The prompt pieces above are TEMPLATES: every robot name is a %ROBOT_A% / %ROBOT_B% sentinel, and
+# the roster block is %ROBOT_ROSTER%. They are filled in per call from the roster the launch file
+# configured (exec's `robot_names` parameter), so renaming a robot there is enough — the prompt, the
+# reply schema (route_schema) and the marker colours all follow from the same list.
+#
+# Sentinels rather than f-strings because these strings are full of literal JSON braces.
+
+DEFAULT_ROBOT_NAMES = ("raph", "donnie")
+
+
+def _check_roster(robot_names) -> list:
+    """Return the roster as a list, or raise if it is not exactly two robots.
+
+    The prompts (roster block, worked examples, CoT scaffolds) are written for two robots, so any
+    other count would silently produce text that disagrees with route_schema's robot list. Failing
+    here turns that into an immediate, readable error instead of a confused model.
+    """
+    names = list(robot_names)
+    if len(names) != 2:
+        raise ValueError(
+            f"prompts support exactly 2 robots, got {names}. Set the `robot_names` parameter to two "
+            "names (see the launch files' bot_name / bot2_name).")
+    return names
+
+
+def _fill(text: str, robot_names) -> str:
+    """Substitute the robot sentinels in a prompt template.
+
+    Single place for the substitution rules so the pieces cannot drift apart. Colours come from
+    map_gen.ROBOT_COLOR_NAMES, index-aligned with the _ROBOT_COLORS the overlay actually draws, so
+    the description can never contradict the image.
+    """
+    names = _check_roster(robot_names)
+    # Pad the quoted names to a common width so the em-dashes line up whatever the names are.
+    width = max(len(n) for n in names) + 2          # +2 for the surrounding quotes
+    roster = "\n".join(
+        f'- {chr(34) + name + chr(34):<{width}} — the round black TurtleBot labeled "{name}" with '
+        f'{ROBOT_COLOR_NAMES[i % len(ROBOT_COLOR_NAMES)]} in the image.'
+        for i, name in enumerate(names))
+    return (text.replace("%ROBOT_ROSTER%", roster)
+                .replace("%ROBOT_A%", names[0])
+                .replace("%ROBOT_B%", names[1]))
+
+
+def _common_preamble(robot_names) -> str:
+    """Piece 1: robot roster + global rules."""
+    return _fill(COMMON_PREAMBLE, robot_names)
+
+
+def _controller_explain(controller: str, robot_names) -> str:
+    """Piece 4: what to select, output schema and worked example for this controller."""
+    return _fill(CONTROLLER_EXPLAIN[controller], robot_names)
+
+
+def _cot_block(controller: str, robot_names, map_overlay_type: str) -> str:
+    """Piece 5: the controller's chain-of-thought scaffold.
+
+    The maneuver scaffold carries a %RED_MARKER_STEP% sentinel filled only for the marked_obs
+    overlay — the only overlay that draws red X marks, so the model is never asked to inventory
+    marks that do not exist. The whole sentinel LINE is replaced (including its newline) so omitting
+    the sub-step leaves no blank line behind.
+    """
+    block = COT_BLOCKS[controller]
+    if controller == "maneuver":
+        red = _RED_MARKER_SUBSTEP if map_overlay_type == "marked_obs" else ""
+        block = block.replace("%RED_MARKER_STEP%\n", red)
+    return _fill(block, robot_names)
+
+
+def classifier_prompt(robot_names=DEFAULT_ROBOT_NAMES) -> str:
+    """System prompt for the CLASSIFIER call, with the configured robot names filled in.
+
+    Public because both exec.py and the offline harnesses make this call directly.
+    """
+    return _fill(_CLASSIFIER_SYSTEM_PROMPT, robot_names)
+
+
 # ── Constructor ────────────────────────────────────────────────────────────────
 
 def generate_prompt(instruction, controller, map_overlay_type, *,
-                    pil_img, occ_grid, occ_meta, camera, robot_poses=None, cot=False):
+                    pil_img, occ_grid, occ_meta, camera, robot_poses=None, cot=False,
+                    robot_names=DEFAULT_ROBOT_NAMES):
     """Assemble the planner system prompt AND render the matching overlay image.
 
     Returns ``(prompt_text, image_b64)``. ``controller`` selects the task semantics + output schema
@@ -300,6 +384,11 @@ def generate_prompt(instruction, controller, map_overlay_type, *,
     renderer that draws the image, so text and image always agree. ``cot=True`` appends the
     controller's chain-of-thought scaffold (piece 5); for maneuver the red-marker sub-step is included
     only when ``map_overlay_type == "marked_obs"``.
+
+    ``robot_names`` (exactly two) names the robots throughout the prompt. Pass the SAME roster used
+    for ``route_schema`` — the prompt describes the robots the schema will accept, and its order sets
+    which marker colour belongs to which robot. Callers normally pass exec's ``robot_names``
+    parameter, i.e. whatever the launch file configured.
 
     Render inputs: ``pil_img`` (RGBA overhead frame), the pre-inflated planning grid ``occ_grid`` +
     ``occ_meta`` (used by the points/marked_obs renderers; ignored by battleship), ``camera`` calibration
@@ -327,21 +416,16 @@ def generate_prompt(instruction, controller, map_overlay_type, *,
         listing = ", ".join(blocked) if blocked else "(none)"
         overlay_desc = f"{overlay_desc}\nThe points marked impassable (red X) in this image are: {listing}. Do not choose one of these points as a waypoint for the robots."
 
-    # Assemble the text prompt in the fixed piece order.
+    # Assemble the text prompt in the fixed piece order. The overlay description carries no robot
+    # names, so it is used verbatim; the other pieces are filled from the roster.
     parts = [
-        COMMON_PREAMBLE,
+        _common_preamble(robot_names),
         overlay_desc,
-        CONTROLLER_EXPLAIN[controller],
+        _controller_explain(controller, robot_names),
         _operator_line(instruction),
     ]
     if cot:
-        cot_block = COT_BLOCKS[controller]
-        if controller == "maneuver":
-            red = _RED_MARKER_SUBSTEP if map_overlay_type == "marked_obs" else ""
-            # Strip the whole sentinel line (incl. its newline) so omitting the sub-step leaves no
-            # blank line; _RED_MARKER_SUBSTEP carries its own trailing newline when present.
-            cot_block = cot_block.replace("%RED_MARKER_STEP%\n", red)
-        parts.append(cot_block)
+        parts.append(_cot_block(controller, robot_names, map_overlay_type))
     return "\n\n".join(parts), image_b64
 
 
@@ -398,15 +482,15 @@ def classifier_schema():
 
 # ── Classifier prompt ──────────────────────────────────────────────────────────
 
-CLASSIFIER_SYSTEM_PROMPT = """\
-You are a robot navigation classifier for two TurtleBot robots named raph and donnie.
+_CLASSIFIER_SYSTEM_PROMPT = """\
+You are a robot navigation classifier for two TurtleBot robots named %ROBOT_A% and %ROBOT_B%.
 You receive an operator instruction and route it to the motion planner best suited to carry it out.
 Choose exactly one task type:
 
 - "nav2point": Best for tasks where each robot drives to one or more goal locations in order.
   The DESTINATION(S) matter; the exact path taken does not.
   Ex 1. "Send each robot to the nearest box."
-  Ex 2. "Send raph to the chair and then the person. Have donnie stay in place."
+  Ex 2. "Send %ROBOT_A% to the chair and then the person. Have %ROBOT_B% stay in place."
 
 - "coverage": Best for tasks that involve patrolling or sweeping an area.
   The planner selects high-level regions to cover, not a specific path. A low level controller 
@@ -418,7 +502,7 @@ Choose exactly one task type:
   Use this when the instruction constrains HOW the robot travels (loops, specific routes, avoidance etc.).
   Use this task type only when "nav2point" and "coverage" are insufficient.
   Do not use it for static formations (e.g. surround, block...etc.), relative final positions, or coordinated destination assignments.
-  Ex 1. "Have raph do a loop around the chair and return to its start location."
+  Ex 1. "Have %ROBOT_A% do a loop around the chair and return to its start location."
   Ex 2. "Have the robots navigate to the chair, staying as far away from the people as possible."
 
 Respond with EXACTLY one JSON object and nothing else:
