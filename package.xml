@@ -14,8 +14,10 @@
   <exec_depend>tf_transformations</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>turtlebot4_msgs</exec_depend>
-  <exec_depend>turtlebot4_gazebo</exec_depend>
-  <exec_depend>turtlebot4_ignition</exec_depend>
+  <!-- Simulation only, and NOT declared here: the Ignition launch files pull in
+       turtlebot4_ignition_bringup / turtlebot4_description / turtlebot4_ignition_gui_plugins.
+       Install them with the TurtleBot 4 simulator packages (see README Prerequisites); the lab
+       deployment launch needs none of them. -->
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

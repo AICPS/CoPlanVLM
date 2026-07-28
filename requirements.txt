@@ -1,8 +1,10 @@
-rclpy
+# pip dependencies only. ROS packages (rclpy, cv_bridge, ament_index_python, tf_transformations,
+# the *_msgs packages) are NOT listed here — they come from your ROS 2 install via apt/rosdep and
+# do not exist on PyPI, so listing them makes `pip install -r` fail outright. See package.xml.
+
 python-dotenv
 openai
-pyaudio
-transforms3d>=0.4.2
+transforms3d>=0.4.2   # tf_transformations needs it, but pulls it from pip rather than ROS
 
 # CLIPSeg traversability segmentation (obs_seg)
 torch
@@ -14,6 +16,3 @@ numpy
 # Planning / imaging / plotting used across the nodes and scripts
 matplotlib      # scripts/plot_success_rates.py
 Pillow>=9.1.0   # >=9.1 for PIL.Image.Resampling, required by recent transformers
-
-# Audio nodes (node_Speech_Gen / node_Listener, only when use_audio:=true)
-sounddevice
