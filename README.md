@@ -113,12 +113,12 @@ instances that handle both robots via their `robot_names` parameter.
 | `/vlm_plan` | `std_msgs/String` (JSON) | Executive → Translator, Visualizer |
 | `/<robot>/waypoint_path` | `std_msgs/Float32MultiArray` `[x1,y1,x2,y2,…]` | Translator → Control |
 | `/<robot>/cmd_vel` | `geometry_msgs/Twist` | Control → base |
-| `/<robot>/ned/pose_stamped` | `geometry_msgs/PoseStamped` (BEST_EFFORT) | Odom shim *(sim)* / MoCap *(lab)* → everyone |
-| `/path_visualization` | `sensor_msgs/Image` | Visualizer → RViz / `showimage` |
+| `/<robot>/ned/pose_stamped` | `geometry_msgs/PoseStamped` | Odom shim *(sim)* / MoCap *(lab)* → everyone |
+| `/path_visualization` | `sensor_msgs/Image` | Visualizer → the node opens its own OpenCV window |
 | overhead image | `sensor_msgs/Image` | `/ids_overhead/image` *(sim)* · `/ueye/test/image_raw` *(lab)* |
 | overhead info | `sensor_msgs/CameraInfo` | `/ids_overhead/camera_info` *(sim)* · `/ueye/test/camera_info` *(lab)* |
 
-`/vlm_plan` payload:
+`/vlm_plan` example:
 
 ```json
 {"planner": "astar", "routes": {"raph": ["G7", "H8"], "donnie": ["C3"]}}
@@ -134,7 +134,7 @@ instances that handle both robots via their `robot_names` parameter.
 * **Simulation** – Ignition Gazebo **Fortress** plus the TurtleBot 4 sim packages. Follow the
   [TurtleBot 4 simulator install guide](https://turtlebot.github.io/turtlebot4-user-manual/software/turtlebot4_simulator.html#installation).
 * **Python** – see [`requirements.txt`](requirements.txt). Includes `torch` / `transformers` for
-  CLIPSeg; a GPU is recommended but not required.
+  CLIPSeg, which uses CUDA when available and falls back to CPU automatically.
 * **OpenAI API key** – see [Configuration](#configuration).
 
 ---
@@ -146,7 +146,7 @@ instances that handle both robots via their `robot_names` parameter.
 mkdir -p ~/turtle4_ws/src && cd ~/turtle4_ws
 
 # 2. clone the repo
-git clone <your-repo-url> src/CoPlanVLM
+git clone https://github.com/AICPS/CoPlanVLM.git src/CoPlanVLM
 
 # 3. install Python deps
 python3 -m pip install -r src/CoPlanVLM/requirements.txt
@@ -157,11 +157,6 @@ rosdep install --from-paths src --ignore-src -y
 colcon build --symlink-install
 source install/setup.bash
 ```
-
-> **Always run `colcon build` from the workspace root.** colcon builds relative to your working
-> directory and will silently adopt any directory containing a `package.xml` as the workspace
-> root. Running it from inside `src/CoPlanVLM/` produces a green "Finished" while writing a nested
-> `build/`, `install/`, `log/` tree that the launch files never look at.
 
 > **Tip:** add `source ~/turtle4_ws/install/setup.bash` to your `~/.bashrc`.
 
@@ -186,13 +181,6 @@ Every node that converts pixels ↔ metres takes a `camera` parameter — `gazeb
 selecting an entry in `coord_transform.CAMERAS` (focal lengths, principal point, mounting height).
 The launch files set it; you should not need to.
 
-### Other parameters
-
-```bash
-ros2 param list /node_Executive_API      # after startup
-ros2 launch coplan_vlm coplan_vlm_4sim.launch.py --show-args
-```
-
 ---
 
 ## Running in Simulation
@@ -209,13 +197,7 @@ This brings up the Ignition world with `raph`, waits `IGNITION_DELAY` seconds (d
 world to settle, then runs `spawn_second_robot.sh` to add `donnie` and its controllers. Both
 robots come from this one script.
 
-```bash
-IGNITION_DELAY=25 ./src/CoPlanVLM/scripts/launch_all.sh    # slow machine
-./src/CoPlanVLM/scripts/launch_all.sh donnie 1.5 2.0       # override donnie's spawn pose
-```
-
-Wait until both robots are spawned and their controllers are up. Ctrl‑C tears everything down and
-sweeps orphaned sim processes.
+Wait until both robots are spawned and visible in the sim. Ctrl‑C tears everything down and sweeps orphaned sim processes.
 
 ### 2. Start the planning stack
 
@@ -225,31 +207,14 @@ ros2 launch coplan_vlm coplan_vlm_4sim.launch.py
 
 Starts the Executive, Translator, Visualizer, and one Control + Odometry‑to‑Pose pair per robot.
 
-Optional replanning arguments:
-
-```bash
-ros2 launch coplan_vlm coplan_vlm_4sim.launch.py replan_mode:=dynamic replan_period:=30.0
-```
-
-`static` (the default) plans once per prompt; `dynamic` re‑plans the same prompt on a timer.
-
 ### 3. Send a mission
 
 ```bash
 ./src/CoPlanVLM/scripts/send_prompt.sh "Send raph to the chair and donnie to the table"
-./src/CoPlanVLM/scripts/send_prompt.sh "Sweep the open floor with both robots"
+./src/CoPlanVLM/scripts/send_prompt.sh "Patrol the perimeter of the map"
 ```
 
-Watch it work:
-
-```bash
-ros2 topic echo /vlm_plan               # task type, planner, cells per robot
-ros2 topic echo /raph/waypoint_path     # metric waypoints
-ros2 topic echo /donnie/cmd_vel         # velocity commands
-```
-
-The Executive logs the chosen task type, e.g.
-`[exec] Planned [task=coverage -> planner=coverage] routes: {...}`.
+Watch it work in the `node_Path_Visualizer` window.
 
 ---
 
@@ -258,14 +223,18 @@ The Executive logs the chosen task type, e.g.
 Same stack, minus the simulator. The lab replaces two things: MoCap publishes robot poses
 directly, and the ueye overhead camera replaces the sim camera. Because MoCap already publishes
 NED `PoseStamped`, the deploy launch **omits both `node_Odometry_To_Pose` converters** — they exist
-only to translate Gazebo odometry.
+only to translate Gazebo odometry to the NED frame.
 
-### 1. Bring up the room
+### 1. Bring up the Mocap room
 
-<!-- TODO: MoCap and ueye camera startup instructions go here. -->
+```bash
+ros2 run ros_vrpn_client ros_vrpn_client --ros-args -r __node:=donnie -p vrpn_ip:="192.168.1.104" -p my_int:=3883
+```
 
-> **Placeholder.** The commands that start the motion‑capture system and the ueye camera driver
-> live outside this repo and have not been documented yet.
+### 2. Launch the ueye client:
+```bash
+ros2 launch ueye_cam standalone.launch.py
+```
 
 Before launching, these four topics must be publishing:
 
@@ -276,20 +245,9 @@ Before launching, these four topics must be publishing:
 | `/ueye/test/image_raw` | ueye overhead camera |
 | `/ueye/test/camera_info` | ueye overhead camera |
 
-Verify each is live and has a publisher:
+Verify each is live and has a publisher.
 
-```bash
-ros2 topic list | grep -E "ned/pose_stamped|ueye"
-ros2 topic hz /raph/ned/pose_stamped
-ros2 topic hz /donnie/ned/pose_stamped
-ros2 topic hz /ueye/test/image_raw
-ros2 topic echo --once /ueye/test/camera_info
-```
-
-A missing `camera_info` is the quiet failure mode: the stack skips lens undistortion rather than
-erroring, and overlays drift from reality toward the edges of the frame.
-
-### 2. Start the planning stack
+### 3. Start the planning stack
 
 ```bash
 ros2 launch coplan_vlm coplan_vlm_deploy.launch.py
@@ -343,8 +301,6 @@ OpenAI API credits.**
 | --- | --- |
 | `scripts/test_pipeline.py` | The reference pipeline on a sim overhead image |
 | `scripts/test_pipeline_real.py` | Same, on a real lab image with `lab_test` calibration |
-| `scripts/test_battleship_baseline.py` | Baseline: plain battleship grid instead of set‑of‑marks |
-| `scripts/test_regression_only.py` | Baseline: raw pixel coordinates, no grid |
 
 ```bash
 python3 src/CoPlanVLM/scripts/test_pipeline.py \
@@ -353,31 +309,6 @@ python3 src/CoPlanVLM/scripts/test_pipeline.py \
 
 `scripts/test_map_gen.py` renders overlays with **no** API calls — useful for checking the image
 before spending a request.
-
-### Live inspection
-
-```bash
-ros2 node list                                       # every node up?
-ros2 topic echo /vlm_plan
-ros2 run image_tools showimage --ros-args -r image:=/path_visualization
-rqt_graph                                            # topic wiring
-```
-
----
-
-## Development Guidelines
-
-1. **Shared logic is ROS‑free.** Libraries under `nodes/` (`coord_transform`, `obs_seg`,
-   `debug_io`) import no `rclpy`, so live nodes and offline harnesses run identical code. Anything
-   validated offline is what the robots execute.
-2. **One source of truth per contract.** Prompts, schemas and task→planner routing all live in
-   `node_Executive_API/prompt_gen.py`; both the Executive and the harnesses import from it.
-3. **Debug artifacts go through `debug_io`** — never an ad‑hoc `cv2.imwrite`. One writer means one
-   filename, one failure mode, and no drift between environments.
-4. **Keep nodes single‑responsibility** and avoid blocking work in callbacks.
-5. **No secrets in code.** Use `config/.env` or ROS 2 parameters.
-6. **Rebuild after changing entry points**, `setup.py`, or adding a package directory.
-7. **Keep this README in sync** with the code.
 
 ---
 

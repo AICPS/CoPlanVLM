@@ -24,7 +24,7 @@
   <exec_depend>gazebo_msgs</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-dotenv</exec_depend>
-  <exec_depend>openai</exec_depend>
+  <!-- openai is pip-only (no rosdep key exists); it is declared in requirements.txt instead. -->
 
 
   <export>
