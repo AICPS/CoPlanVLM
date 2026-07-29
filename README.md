@@ -114,7 +114,6 @@ instances that handle both robots via their `robot_names` parameter.
 | `/<robot>/waypoint_path` | `std_msgs/Float32MultiArray` `[x1,y1,x2,y2,…]` | Translator → Control |
 | `/<robot>/cmd_vel` | `geometry_msgs/Twist` | Control → base |
 | `/<robot>/ned/pose_stamped` | `geometry_msgs/PoseStamped` | Odom shim *(sim)* / MoCap *(lab)* → everyone |
-| `/path_visualization` | `sensor_msgs/Image` | Visualizer → the node opens its own OpenCV window |
 | overhead image | `sensor_msgs/Image` | `/ids_overhead/image` *(sim)* · `/ueye/test/image_raw` *(lab)* |
 | overhead info | `sensor_msgs/CameraInfo` | `/ids_overhead/camera_info` *(sim)* · `/ueye/test/camera_info` *(lab)* |
 

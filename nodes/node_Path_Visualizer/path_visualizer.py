@@ -21,10 +21,14 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Float32MultiArray, String
 
 from cv_bridge import CvBridge
-from ament_index_python.packages import get_package_share_directory
 
 from coord_transform import (world_to_pixel, world_to_pixel_pose, ned_to_world,
                              ned_to_world_pose, yaw_from_quaternion)
+
+ROBOT_LABEL_SCALE = 0.8
+ROBOT_LABEL_THICKNESS = 2
+PLANNED_PATH_THICKNESS = 4
+TRAJECTORY_THICKNESS = 4
 
 
 class PathVisualizer(Node):
@@ -45,23 +49,16 @@ class PathVisualizer(Node):
         self.robot_names = [str(n) for n in self.get_parameter("robot_names").value]
         self.camera_image_topic = self.get_parameter("camera_image_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
-        self.viz_topic = self.get_parameter("viz_topic").value
 
-        self.save_overlays = bool(self.get_parameter("save_overlays").value)
         self.window_name = self.get_parameter("window_name").value
         self.display_scale = float(self.get_parameter("display_scale").value)
-        self.line_thickness = int(self.get_parameter("line_thickness").value)
         self.circle_radius = int(self.get_parameter("circle_radius").value)
         # Perpendicular spacing (px) between robots' planned paths so coincident routes render as
         # parallel tracks instead of one hiding the other. 0 disables the offset.
         self.path_offset_px = float(self.get_parameter("path_offset_px").value)
 
         self.start_color = tuple(int(c) for c in self.get_parameter("start_color").value)
-        self.path_color = tuple(int(c) for c in self.get_parameter("path_color").value)
-        self.arrowhead_color = tuple(int(c) for c in self.get_parameter("arrowhead_color").value)
         self.end_color = tuple(int(c) for c in self.get_parameter("end_color").value)
-        self.world_path_color = tuple(int(c) for c in self.get_parameter("world_path_color").value)
-        self.robot_color = tuple(int(c) for c in self.get_parameter("robot_color").value)
 
         # Pixel<->world calibration lives entirely in coord_transform (see _world_to_pixel).
         self.grid_pixels = self._load_grid_csv(self.grid_csv)
@@ -76,7 +73,6 @@ class PathVisualizer(Node):
         }
 
         self.latest_camera_image: Optional[np.ndarray] = None
-        self.captured_map: Optional[np.ndarray] = None
         # Per-robot latest state, keyed by robot name.
         self.latest_path_labels: Dict[str, List[str]] = {n: [] for n in self.robot_names}
         self.latest_world_path: Dict[str, List[Tuple[float, float]]] = {n: [] for n in self.robot_names}
@@ -88,12 +84,8 @@ class PathVisualizer(Node):
         self.camera_matrix: Optional[np.ndarray] = None
         self.dist_coeffs: Optional[np.ndarray] = None
 
-        self.overlay_path = (
-            Path(get_package_share_directory("coplan_vlm")) / "path_overlay.png"
-        )
-
-        # /vlm_plan ({planner, routes} wrapper, or a bare {robot: [labels]} dict) + shared camera
-        # image + camera info.
+        # /vlm_plan supplies the VLM-selected endpoints retained in the live view. The translated,
+        # obstacle-aware path arrives separately on each robot's /waypoint_path topic.
         self.create_subscription(String, self.vlm_plan_topic, self._path_callback, 10)
         self.create_subscription(Image, self.camera_image_topic, self._camera_image_callback, 1)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 1)
@@ -110,8 +102,6 @@ class PathVisualizer(Node):
             self.create_subscription(
                 PoseStamped, f"/{name}/ned/pose_stamped", self._make_pose_cb(name), pose_qos)
 
-        self.viz_publisher = self.create_publisher(Image, self.viz_topic, 10)
-
         # Keeps the live OpenCV view updated with world path, path labels, and robot pose.
         self.create_timer(0.1, self.plot_tracking_window)
 
@@ -127,25 +117,18 @@ class PathVisualizer(Node):
         self.declare_parameter("robot_names", ["raph", "donnie"])
         self.declare_parameter("camera_image_topic", "/camera_image")
         self.declare_parameter("camera_info_topic", "/ids_overhead/camera_info")
-        self.declare_parameter("viz_topic", "/path_visualization")
 
         # Which overhead camera calibration to use for world<->pixel: "gazebo" (sim) or
         # "lab_test" (hardware). Set by the launch file. Poses always arrive in NED.
         self.declare_parameter("camera", "gazebo")
 
-        self.declare_parameter("save_overlays", True)
         self.declare_parameter("window_name", "Path Tracking")
         self.declare_parameter("display_scale", 0.5)
-        self.declare_parameter("line_thickness", 6)
         self.declare_parameter("circle_radius", 14)
         self.declare_parameter("path_offset_px", 10.0)
 
         self.declare_parameter("start_color", [0, 255, 0])
-        self.declare_parameter("path_color", [165, 33, 0])
-        self.declare_parameter("arrowhead_color", [22, 70, 250])
         self.declare_parameter("end_color", [0, 0, 255])
-        self.declare_parameter("world_path_color", [200, 200, 200])
-        self.declare_parameter("robot_color", [255, 0, 255])
 
     def _load_grid_csv(self, csv_path: str) -> Dict[str, Tuple[float, float]]:
         pixels: Dict[str, Tuple[float, float]] = {}
@@ -187,9 +170,6 @@ class PathVisualizer(Node):
             self.latest_path_labels[name] = (
                 [str(x) for x in labels] if isinstance(labels, list) else [])
 
-        # Capture map once and draw waypoints for a stable path snapshot.
-        self.plot_waypoints_on_captured_image()
-
     def _make_world_path_cb(self, name: str):
         def _cb(msg: Float32MultiArray) -> None:
             coords: List[Tuple[float, float]] = []
@@ -207,9 +187,6 @@ class PathVisualizer(Node):
 
         image = self._undistort_image(image)
         self.latest_camera_image = image
-        if self.captured_map is None:
-            self.captured_map = image.copy()
-            self.get_logger().info("Captured base map image for waypoint overlays")
 
     def _camera_info_callback(self, msg: CameraInfo) -> None:
         self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
@@ -274,54 +251,13 @@ class PathVisualizer(Node):
         return int(round(u)), int(round(v))
 
 
-    def _draw_colored_arrow(
-        self,
-        image: np.ndarray,
-        start_pt: Tuple[int, int],
-        end_pt: Tuple[int, int],
-        color: Optional[Tuple[int, int, int]] = None,
-    ) -> None:
-        """Draw a colored shaft (per-robot when color given) with an orange arrowhead."""
-        shaft_color = color if color is not None else self.path_color
-        cv2.line(image, start_pt, end_pt, shaft_color, self.line_thickness)
-
-        dx = end_pt[0] - start_pt[0]
-        dy = end_pt[1] - start_pt[1]
-        length = math.hypot(dx, dy)
-        if length == 0.0:
-            return
-
-        head_length = max(12.0, float(self.line_thickness) * 3.0)
-        head_length = min(head_length, length * 0.75)
-        head_width = max(10.0, float(self.line_thickness) * 2.6)
-
-        ux = dx / length
-        uy = dy / length
-        base_x = end_pt[0] - ux * head_length
-        base_y = end_pt[1] - uy * head_length
-        perp_x = -uy
-        perp_y = ux
-
-        left_pt = (
-            int(round(base_x + perp_x * head_width / 2.0)),
-            int(round(base_y + perp_y * head_width / 2.0)),
-        )
-        right_pt = (
-            int(round(base_x - perp_x * head_width / 2.0)),
-            int(round(base_y - perp_y * head_width / 2.0)),
-        )
-
-        head = np.array([end_pt, left_pt, right_pt], dtype=np.int32)
-        cv2.fillConvexPoly(image, head, self.arrowhead_color)
-
-    def _draw_grid_path(
+    def _draw_grid_endpoints(
         self,
         image: np.ndarray,
         path_pixels: List[Tuple[int, int]],
-        color: Tuple[int, int, int],
         label_prefix: str = "",
     ) -> None:
-        """Draw one robot's grid-label route: start/end markers + colored arrows."""
+        """Draw only one VLM route's start/end markers; do not connect its centroids."""
         prefix = f"{label_prefix} " if label_prefix else ""
         if len(path_pixels) >= 1:
             cv2.circle(image, path_pixels[0], self.circle_radius, self.start_color, 3)
@@ -337,31 +273,6 @@ class PathVisualizer(Node):
                 (path_pixels[-1][0] + 10, path_pixels[-1][1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.end_color, 2, cv2.LINE_AA,
             )
-        for i in range(len(path_pixels) - 1):
-            self._draw_colored_arrow(image, path_pixels[i], path_pixels[i + 1], color)
-
-    def plot_waypoints_on_captured_image(self) -> None:
-        """Plot each robot's waypoint arrows on the captured map and publish/save result."""
-        if self.captured_map is None:
-            return
-
-        image = self.captured_map.copy()
-        for i, name in enumerate(self.robot_names):
-            path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
-            path_pixels = self._offset_polyline(path_pixels, self._robot_offset(i))
-            self._draw_grid_path(image, path_pixels, self.robot_colors[name], name)
-
-        try:
-            out_msg = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
-            self.viz_publisher.publish(out_msg)
-        except Exception as exc:
-            self.get_logger().warn(f"Failed to publish overlay image: {exc}")
-
-        if self.save_overlays:
-            try:
-                cv2.imwrite(str(self.overlay_path), image)
-            except Exception as exc:
-                self.get_logger().warn(f"Failed to save overlay image: {exc}")
 
     @staticmethod
     def _draw_dashed_polyline(img, pts, color, thickness=2, dash=14.0, gap=10.0):
@@ -399,19 +310,23 @@ class PathVisualizer(Node):
             world_pixels = [self._world_to_pixel(x, y) for x, y in self.latest_world_path[name]]
             world_pixels = self._offset_polyline(world_pixels, offset)
             for i in range(len(world_pixels) - 1):
-                cv2.line(frame, world_pixels[i], world_pixels[i + 1], color, 2)
+                cv2.line(
+                    frame, world_pixels[i], world_pixels[i + 1],
+                    color, PLANNED_PATH_THICKNESS, cv2.LINE_AA)
 
-            # VLM label path from /vlm_plan as colored arrows.
+            # Retain only the VLM route's start/end markers. The centroid-to-centroid route is not
+            # a collision-aware path; the solid path above is the translated planner output.
             path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
             path_pixels = self._offset_polyline(path_pixels, offset)
-            self._draw_grid_path(frame, path_pixels, color, name)
+            self._draw_grid_endpoints(frame, path_pixels, name)
 
             # Actual measured trajectory trail (history of poses), drawn DASHED in the robot's
             # color so it reads distinct from the SOLID planned path. Poses are in NED, so
             # convert NED -> world -> pixel to overlay the planned path.
             traj = [self._world_to_pixel(*ned_to_world(hx, hy))
                     for hx, hy in self.pose_history[name]]
-            self._draw_dashed_polyline(frame, traj, color, thickness=2)
+            self._draw_dashed_polyline(
+                frame, traj, color, thickness=TRAJECTORY_THICKNESS)
 
             # Robot pose from /<name>/ned/pose_stamped (NED).
             pose_msg = self.latest_pose[name]
@@ -433,23 +348,23 @@ class PathVisualizer(Node):
                 cv2.circle(frame, (robot_u, robot_v), 10, color, -1)
                 cv2.arrowedLine(frame, (robot_u, robot_v), tip, (255, 255, 255), 5, tipLength=0.5)
                 cv2.circle(frame, (robot_u, robot_v), 12, (0, 0, 255), 3)   # red ring = current pose
-                cv2.putText(
-                    frame, name, (robot_u + 10, robot_v + 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
-                )
 
-        total_labels = sum(len(v) for v in self.latest_path_labels.values())
-        total_world = sum(len(v) for v in self.latest_world_path.values())
-        cv2.putText(
-            frame,
-            f"waypoints: {total_labels}  world_pts: {total_world}",
-            (20, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+                (text_w, text_h), baseline = cv2.getTextSize(
+                    name, cv2.FONT_HERSHEY_SIMPLEX,
+                    ROBOT_LABEL_SCALE, ROBOT_LABEL_THICKNESS)
+                label_x = robot_u + 16
+                if label_x + text_w >= frame.shape[1]:
+                    label_x = robot_u - 16 - text_w
+                label_x = max(0, min(label_x, frame.shape[1] - text_w - 1))
+                label_y = max(
+                    text_h,
+                    min(robot_v + text_h // 2, frame.shape[0] - baseline - 1),
+                )
+                cv2.putText(
+                    frame, name, (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    ROBOT_LABEL_SCALE, color, ROBOT_LABEL_THICKNESS, cv2.LINE_AA,
+                )
 
         if 0.0 < self.display_scale < 1.0:
             new_w = max(1, int(frame.shape[1] * self.display_scale))

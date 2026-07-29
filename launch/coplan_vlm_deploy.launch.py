@@ -134,11 +134,7 @@ def generate_launch_description():
         emulate_tty=True,
         parameters=[
             {'grid_csv': grid_csv_path},
-            {'save_overlays': True},
-            {'line_thickness': 8},
             {'circle_radius': 16},
-            {'world_path_color': [200, 200, 200]},  # Light gray for reference path
-            {'robot_color': [255, 0, 255]},  # Magenta for robot
             {'robot_names': [bot_name, bot2_name]},
             {'camera': 'lab_test'},   # overhead camera calibration for world<->pixel
             # Real camera intrinsics — the SAME topic exec uses, so both nodes undistort the frame
