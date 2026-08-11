@@ -9,13 +9,13 @@
 3. [Project Architecture](#project-architecture)
 4. [Node Reference](#node-reference)
 5. [Topics & Interfaces](#topics--interfaces)
-6. [Prerequisites](#prerequisites)
-7. [Workspace Setup](#workspace-setup)
-8. [Configuration](#configuration)
-9. [Running in Simulation](#running-in-simulation)
-10. [Running in the Lab](#running-in-the-lab)
-11. [Testing & Debugging](#testing--debugging)
-12. [Development Guidelines](#development-guidelines)
+6. [Safety Filter (CBF‑QP)](#safety-filter-cbfqp)
+7. [Prerequisites](#prerequisites)
+8. [Workspace Setup](#workspace-setup)
+9. [Configuration](#configuration)
+10. [Running in Simulation](#running-in-simulation)
+11. [Running in the Lab](#running-in-the-lab)
+12. [Testing & Debugging](#testing--debugging)
 13. [License](#license)
 
 ---
@@ -71,13 +71,19 @@ operator sentence
         │ /raph/waypoint_path   │ /donnie/waypoint_path
         ▼                       ▼
 ┌───────────────┐       ┌───────────────┐
-│ node_Control  │       │ node_Control  │
-│    (raph)     │       │   (donnie)    │
+│ node_Control  │◄─────►│ node_Control  │  each sees the other's pose
+│    (raph)     │ poses │   (donnie)    │
+│  P controller │       │  P controller │
+│  + CBF filter │       │  + CBF filter │
 └───────┬───────┘       └───────┬───────┘
         │ /raph/cmd_vel         │ /donnie/cmd_vel
         ▼                       ▼
      TurtleBot 4             TurtleBot 4
 ```
+
+Each `node_Control` runs a [CBF‑QP safety filter](#safety-filter-cbfqp) on its own output, using the
+other robot's pose and the shared occupancy grid — so collisions are avoided even when the plan
+itself is stale.
 
 `node_Path_Visualizer` subscribes alongside this chain and draws both robots' plans and live poses
 on the overhead frame.
@@ -94,7 +100,7 @@ figure shows the same instant the VLM saw.
 | --- | --- | --- |
 | `node_Executive_API` | `node_Executive_API.exec` | Classifier + planner LLM calls, CLIPSeg, publishes `/vlm_plan` |
 | `node_Path_Translator` | `node_Path_Translator.translator_node` | Cell labels → metric waypoints via A* / coverage controllers|
-| `node_Control` | `node_Control.control` | Path follower → `/cmd_vel`. **One instance per robot** |
+| `node_Control` | `node_Control.control` | Path follower + [CBF‑QP safety filter](#safety-filter-cbfqp) → `/cmd_vel`. **One instance per robot** |
 | `node_Path_Visualizer` | `node_Path_Visualizer.path_visualizer` | Live overlay of plans + poses |
 | `node_Odometry_To_Pose` | `node_Odometry_To_Pose.odom_to_pose` | **Sim only.** Gazebo odom → NED pose. **One per robot** |
 | `obs_seg_cli` | `obs_seg.cli` | Standalone segmentation / occupancy CLI |
@@ -124,6 +130,118 @@ instances that handle both robots via their `robot_names` parameter.
 ```
 
 `planner` is `astar` for `nav2point`/`maneuver` and `coverage` for `coverage`.
+
+---
+
+## Safety Filter (CBF‑QP)
+
+The VLM plan is obstacle‑aware only at planning time. Anything that happens afterwards — the other
+robot crossing the path, tracking error, a stale plan — is unmodelled. `node_Control` therefore runs
+a **decentralised Control‑Barrier‑Function QP** between the nominal P controller and the `/cmd_vel`
+publisher. Each robot runs its own, using only its own pose, the other robot's pose, and the shared
+occupancy grid.
+
+```
+nominal P controller → [v, ω] → clamp → CBF‑QP filter → safe [v, ω] → /cmd_vel
+```
+
+The nominal controller is **not** modified. With no constraint active the filter returns the nominal
+command byte‑identical (it short‑circuits rather than solving a trivial QP).
+
+### Method
+
+Because `[v, ω]` cannot move a differential‑drive robot sideways, the barrier is enforced on a
+**look‑ahead point** ℓ metres ahead, whose velocity is a full‑rank function of the command:
+
+```
+p_ℓ  = [x + ℓcosθ, y + ℓsinθ]        G(θ) = [[cosθ, −ℓsinθ],      ṗ_ℓ = G(θ)u
+                                             [sinθ,  ℓcosθ]]
+```
+
+For each obstacle/peer centre `p_k`, with `Δp = p_ℓ − p_k`:
+
+```
+h_k = |Δp|² − R_k²          ḣ_k = 2Δpᵀ G(θ) u          ZCBF:  ḣ_k ≥ −γ_k h_k
+QP row:  −2Δpᵀ G(θ) u  ≤  max(γ_k h_k, 0)                       (A u ≤ b)
+```
+
+and the filter solves, subject to those rows and the actuator box:
+
+```
+u* = argmin ½(u − u_nom)ᵀ W (u − u_nom),     W = diag(4, 1)
+```
+
+**Why the `max(…, 0)` clamp.** Without it, a robot starting inside the unsafe set (`h < 0`) faces a
+row demanding `ḣ > 0` — "actively move away" — which is infeasible with an obstacle dead ahead and
+no reverse, since the `ω` coefficient is then exactly zero. The QP would fail, the fallback would
+stop the robot, and stopping never restores `h`: a permanent freeze. The clamp degrades a violated
+row to "do not get worse", which `u = 0` always satisfies. Consequently **the QP is feasible
+unconditionally**, no slack variables are needed, and the robot escapes by rotating until forward
+motion is permitted again.
+
+**Inflation convention.** Map obstacles are read from the `infl` layer of
+`debug/coplan_vlm_occupancy.npz` — the same pre‑inflated grid A\* plans on, already dilated by
+`INFLATION_RADIUS` (0.45 m). The filter therefore adds only a margin and does **not** re‑add the
+robot radius; using the planner's own grid also means the filter never fights a correctly‑tracked
+path. The peer arrives as a raw pose, so it needs the full footprint plus ℓ, because the barrier
+protects the look‑ahead point while the body extends behind it:
+
+```
+R_obstacle = obstacle_safety_margin
+R_robot    = ℓ + radius_self + radius_other + robot_robot_safety_margin
+```
+
+**Fallback.** On solver failure, a non‑finite result, or a post‑solve check of `A u ≤ b + ε` failing,
+the filter publishes **zero linear and angular velocity** and increments a failure counter. It never
+falls back to the unfiltered nominal command.
+
+**Cost.** The QP is only solved on ticks where the nominal command actually violates a row — when it
+is already feasible it *is* the optimum, so it is returned unchanged without invoking the solver.
+Measured against a real occupancy snapshot (20 496 blocked cells): the filter runs in **0.6 ms mean,
+2.1 ms worst** against the 100 ms control period, with 0 solver fallbacks in 1500 poses.
+
+### Parameters
+
+All on `node_Control`; the launch files set `robot_name` / `robot_names` per instance.
+
+**Defaults are not listed here.** Every filter knob is defined once, in `CBFConfig`
+([`nodes/node_Control/cbf_filter.py`](nodes/node_Control/cbf_filter.py)), next to the maths that
+justifies its value; `control.py` seeds each parameter declaration from that dataclass. Read the
+current defaults there, or from a running node with `ros2 param get`. A table of numbers here would
+be a third copy, and third copies go stale.
+
+| Parameter | Meaning |
+| --- | --- |
+| `enable_safety_filter` | `false` bypasses the filter entirely (`safety_filter:=false`) |
+| `robot_name` | which robot this instance drives — **must** be in `robot_names` |
+| `robot_names` | roster; peers are derived as roster‑minus‑self |
+| `lookahead_distance` | ℓ, metres |
+| `cbf_gamma_robot` / `cbf_gamma_obstacle` | ZCBF gains (γ·dt ≪ 1 at 10 Hz) |
+| `robot_radius_self` / `robot_radius_other` | TurtleBot 4 body radius |
+| `robot_robot_safety_margin` | ≥ (v_self + v_peer) × reaction latency + tracking error |
+| `obstacle_safety_margin` | added to the **already inflated** grid; must stay below `RESOLUTION/2` |
+| `obstacle_query_radius` | map obstacles beyond this are ignored |
+| `max_obstacle_constraints` | cap on map rows, nearest‑first |
+| `obstacle_downsample_resolution` | bucket size when thinning obstacle cells |
+| `solver_tolerance` | post‑solve feasibility tolerance (catches gross solver failure) |
+| `linear_velocity_min` | no reverse — blind backing is worse than stopping |
+
+The QP weights are hardcoded `W = diag(4, 1)` in `cbf_filter.py`; only their ratio matters, and it is
+set by normalising each deviation against the actuation available to it.
+
+### Limitations
+
+* The peer is treated as **stationary** within each solve. The error is bounded by its own top speed
+  and absorbed by `robot_robot_safety_margin`; re‑derive that margin if `max_linear_vel` is raised.
+* Protection **assumes both robots run the filter**. A peer with it disabled, driving at full speed,
+  cannot be avoided from one side alone.
+* **Poses are assumed fresh** — there is no staleness detection. If a pose source dies mid‑run the
+  filter keeps computing barriers from a frozen position. Verify the pose topics are live first.
+* ℓ makes `ω` a `1/ℓ` weaker lever than `v`, so the filter **brakes rather than swerves**.
+* Starting *outside* the safe set gives non‑worsening only, not a recovery guarantee.
+* It enforces safety, not progress: two robots meeting head‑on both brake and can deadlock.
+* Safety further depends on pose, map, model and timing accuracy; discrete 10 Hz updates and
+  actuator tracking error are what the conservative margins above pay for.
 
 ---
 
@@ -274,6 +392,16 @@ Identical to sim:
 ---
 
 ## Testing & Debugging
+
+### Unit tests
+
+The safety filter's maths and its closed-loop behaviour are covered by ROS-free tests — no sim, no
+API calls:
+
+```bash
+source install/setup.bash
+python3 -m pytest src/CoPlanVLM/test/ -v
+```
 
 ### Debug artifacts
 

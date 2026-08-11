@@ -16,6 +16,13 @@ opencv-python
 # "_ARRAY_API not found" / "numpy.dtype size changed". Verified on this repo.
 numpy<2
 
+# CBF-QP safety filter (node_Control). osqp >= 1.0 for the `polishing` setting name — without
+# polishing the ADMM solution violates constraints by ~1e-5 and the filter's own post-solve
+# validation would safe-stop the robot on every tick. scipy supplies the sparse matrices osqp
+# requires (it is also an osqp dependency, declared here because we import it directly).
+osqp>=1.0
+scipy
+
 # Planning / imaging / plotting used across the nodes and scripts
 matplotlib      # scripts/plot_success_rates.py
 Pillow>=9.1.0   # >=9.1 for PIL.Image.Resampling, required by recent transformers

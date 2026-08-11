@@ -75,6 +75,14 @@ def generate_launch_description():
             name='node_Control',
             output='screen',
             emulate_tty=True,
+            parameters=[
+                # robot_name says WHICH robot this instance drives; robot_names is the same roster
+                # the other three nodes take. The CBF safety filter derives its peers as
+                # roster-minus-self, so a mismatch here disarms peer avoidance (and is logged).
+                {'robot_name': bot_name},
+                {'robot_names': [bot_name, bot2_name]},
+                {'enable_safety_filter': LaunchConfiguration('safety_filter')},
+            ],
             remappings=[
                 ('/cmd_vel', '/' + bot_name + '/cmd_vel'),
                 ('/waypoint_path', '/' + bot_name + '/waypoint_path'),
@@ -93,6 +101,11 @@ def generate_launch_description():
             name='node_Control_2',
             output='screen',
             emulate_tty=True,
+            parameters=[
+                {'robot_name': bot2_name},
+                {'robot_names': [bot_name, bot2_name]},
+                {'enable_safety_filter': LaunchConfiguration('safety_filter')},
+            ],
             remappings=[
                 ('/cmd_vel', '/' + bot2_name + '/cmd_vel'),
                 ('/waypoint_path', '/' + bot2_name + '/waypoint_path'),
@@ -157,6 +170,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'replan_period', default_value='15.0',
             description='Seconds between dynamic replans (used only when replan_mode:=dynamic).'),
+        DeclareLaunchArgument(
+            'safety_filter', default_value='true', choices=['true', 'false'],
+            description='CBF-QP collision-avoidance filter on the controller output. Set false to '
+                        'restore the pre-filter behaviour exactly (the filter is bypassed, not '
+                        'merely inactive).'),
         exec_api_node,
         control_node,
         control_node_2,
