@@ -43,7 +43,7 @@ from PIL import Image as PILImage
 
 import debug_io
 from coord_transform import gazebo_to_world, gazebo_to_ned, ned_to_world
-from obs_seg.segmenter import TraversabilitySegmenter
+from obs_seg.segmenter import segment_frame
 from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
                                render_inflation_overlay, RESOLUTION as _RESOLUTION)
 from node_Path_Translator import astar_proj
@@ -227,9 +227,7 @@ def main() -> None:
 
     # ── Segmentation + occupancy (same as test_pipeline) ──────────────────
     print("Running CLIPSeg segmentation…")
-    segmenter = TraversabilitySegmenter()
-    pix_labels, _ = segmenter.classify(
-        img_rgb, traversable_prompts=["the floor"], untraversable_prompts=[""], threshold=0.48)
+    pix_labels = segment_frame(img_rgb)
     grid, meta = mask_to_occupancy(pix_labels, _RESOLUTION, camera=camera)
     print(f"Occupancy grid: {meta['width']}×{meta['height']} cells @ {meta['resolution']} m/cell")
 

@@ -39,7 +39,7 @@ from PIL import Image as PILImage
 
 import debug_io
 from coord_transform import world_to_ned, ned_to_world
-from obs_seg.segmenter import TraversabilitySegmenter
+from obs_seg.segmenter import segment_frame
 from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
                                render_inflation_overlay, RESOLUTION as _RESOLUTION)
 
@@ -105,9 +105,7 @@ def main() -> None:
 
     # ── Segmentation + occupancy (shared: overlay filtering + planning) ───
     print("Running CLIPSeg segmentation…")
-    segmenter = TraversabilitySegmenter()
-    pix_labels, _ = segmenter.classify(
-        img_rgb, traversable_prompts=["the floor"], untraversable_prompts=[""], threshold=0.48)
+    pix_labels = segment_frame(img_rgb)
     grid, meta = mask_to_occupancy(pix_labels, _RESOLUTION, camera=camera)
     print(f"Occupancy grid: {meta['width']}×{meta['height']} cells @ {meta['resolution']} m/cell")
 
@@ -147,7 +145,8 @@ def main() -> None:
     # Byte-exact copy of the image sent to the VLM (no decode/re-encode).
     debug_io.save_marks_overlay(args.out, map_b64)
     routes, usage = tp._call_planner_vlm(instructions, map_b64, result_key, args.model, args.temperature,
-                                         list(robot_world_xy), cot=cot, out_dir=args.out)
+                                         list(robot_world_xy), cot=cot, out_dir=args.out,
+                                         controller=task_type)
 
     # ── Grid CSV (shared across robots) ───────────────────────────────────
     csv_path = tp._CONFIG_DIR / "grid_cell_centers.csv"

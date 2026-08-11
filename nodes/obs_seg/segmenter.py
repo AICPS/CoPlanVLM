@@ -18,6 +18,7 @@ CLI (cli.py) and the ROS costmap node.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Sequence
 
 import cv2
@@ -29,6 +30,16 @@ from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 from . import FREE, OCCUPIED, UNKNOWN
 
 MODEL_ID = "CIDAS/clipseg-rd64-refined"
+
+# Single source of truth for the pipeline's segmentation configuration. These are fixed properties
+# of the pipeline (not runtime-tunable): exec uses them via segment_frame() and the offline test
+# harnesses call the same function, so each value lives in exactly one place.
+SEG_TRAVERSABLE   = ["the floor"]
+# Intentionally empty: this project uses the one-sided case of the framework above, where every
+# non-floor pixel falls below threshold -> UNKNOWN -> treated as blocked downstream. Add obstacle
+# prompts here (e.g. "a person") to switch to the two-sided argmax classify() supports.
+SEG_UNTRAVERSABLE = []
+SEG_THRESHOLD     = 0.48
 
 # internal per-prompt class tags
 _TRAVERSABLE, _UNTRAVERSABLE = 0, 1
@@ -102,3 +113,27 @@ class TraversabilitySegmenter:
         """Convenience: boolean (H, W), True where the pixel is confidently traversable."""
         labels, _ = self.classify(image, traversable_prompts, untraversable_prompts, threshold)
         return labels == FREE
+
+
+@lru_cache(maxsize=1)
+def _get_segmenter() -> TraversabilitySegmenter:
+    """Load CLIPSeg once on first call and reuse it."""
+    return TraversabilitySegmenter()
+
+
+def segment_frame(rgb: np.ndarray) -> np.ndarray:
+    """CLIPSeg pixel labels (FREE/OCCUPIED/UNKNOWN) for an RGB frame.
+
+    The single segmentation entry point for the whole project: the live Executive
+    (map_gen.run_segmentation) and every offline harness call THIS, so what the harnesses
+    validate is segmented exactly the way the robots' plans are. Both prompt lists and the
+    threshold come from the constants above and nowhere else — a harness cannot quietly segment
+    with different prompts than the robots do.
+
+    The class above stays general (its own prompt arguments are untouched); this is the project's
+    one chosen configuration of it. obs_seg/cli.py deliberately bypasses this to sweep prompts and
+    thresholds from the command line.
+    """
+    pix_labels, _ = _get_segmenter().classify(
+        rgb, SEG_TRAVERSABLE, SEG_UNTRAVERSABLE, SEG_THRESHOLD)
+    return pix_labels

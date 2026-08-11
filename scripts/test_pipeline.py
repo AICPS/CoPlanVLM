@@ -57,7 +57,7 @@ from PIL import Image as PILImage, ImageDraw, ImageFont
 
 import debug_io
 from coord_transform import gazebo_to_world, gazebo_to_ned, ned_to_world, world_to_pixel
-from obs_seg.segmenter import TraversabilitySegmenter
+from obs_seg.segmenter import segment_frame
 from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
                                render_inflation_overlay, RESOLUTION as _RESOLUTION)
 
@@ -67,7 +67,8 @@ from node_Path_Translator.coverage_proj import PARAMS as COVERAGE_PARAMS
 
 from node_Executive_API.prompt_gen import (
     generate_prompt, route_schema, classifier_schema,
-    CONTROLLERS, MAP_OVERLAY_TYPES, TASK_ROUTING, classifier_prompt)
+    CONTROLLERS, MAP_OVERLAY_TYPES, TASK_ROUTING, classifier_prompt,
+    COT_FIELDS, reasoning_text)
 from node_Executive_API.map_gen import (
     _N_COLS as _GRID_COLS, _N_ROWS as _GRID_ROWS,
     _DOT_RADIUS, _LABEL_SIZE, _ROBOT_COLORS, _ROBOT_RADIUS)
@@ -154,25 +155,11 @@ def _classify(prompt: str, model: str, temperature: float, robot_names) -> str:
     return task_type
 
 
-def _format_reasoning(text: str, width: int = 100) -> str:
-    """Reflow a single-line reasoning string into readable lines: each numbered step "N)" starts a new
-    line, lettered sub-steps "a)"/"b)" are indented, and long lines are wrapped to `width`."""
-    text = re.sub(r"\s*(?<![\w])(\d+\))\s*", r"\n\1 ", text)         # "1)" .. -> own line
-    text = re.sub(r"\s*(?<![\w])([a-z]\))\s+", r"\n   \1 ", text)    # "a)"/"b)" -> indented
-    out = []
-    for ln in text.splitlines():
-        ln = ln.rstrip()
-        if not ln:
-            continue
-        indent = len(ln) - len(ln.lstrip())
-        out.append(textwrap.fill(ln, width=width, subsequent_indent=" " * (indent + 4)))
-    return "\n".join(out)
-
-
 def _call_planner_vlm(instructions: str, map_b64: str, result_key: str,
                       model: str, temperature: float, robot_names: list[str],
                       cot: bool = False, allowed_labels: list[str] | None = None,
-                      out_dir: str | None = None) -> tuple[dict, dict]:
+                      out_dir: str | None = None,
+                      controller: str | None = None) -> tuple[dict, dict]:
     """Second call: vision planner. instructions = per-task prompt, image = the overlay (only).
 
     `map_b64` is the base64 PNG straight from generate_prompt — taken as-is rather than as a PIL
@@ -193,8 +180,9 @@ def _call_planner_vlm(instructions: str, map_b64: str, result_key: str,
     print(instructions)
     print("─" * 71)
 
-    schema = route_schema(result_key, robot_names, cot, allowed_labels)
-    keys = ("reasoning, " if cot else "") + f"{result_key}{{{', '.join(robot_names)}}}"
+    schema = route_schema(result_key, robot_names, cot, allowed_labels, controller=controller)
+    steps = [f for f, _ in COT_FIELDS[controller]] if cot else []
+    keys = "".join(f"{f}, " for f in steps) + f"{result_key}{{{', '.join(robot_names)}}}"
     print(f"Structured output: enforcing schema (keys: {keys})")
     if allowed_labels:
         print(f"  waypoints restricted to {len(allowed_labels)} free cells (obstacle cells excluded)")
@@ -232,9 +220,10 @@ def _call_planner_vlm(instructions: str, map_b64: str, result_key: str,
 
     # Readable terminal view: reflowed reasoning, then a compact per-robot route listing.
     print("─" * 16 + " VLM response " + "─" * 16)
-    if result.get("reasoning"):
+    trace = reasoning_text(result, controller) if cot else ""
+    if trace:
         print("REASONING:")
-        print(_format_reasoning(str(result["reasoning"])))
+        print(textwrap.indent(trace, "  "))
         print()
     print(f"{result_key.upper()}:")
     for name, labels in routes.items():
@@ -308,9 +297,7 @@ def main() -> None:
 
     # ── Segmentation + occupancy (shared: overlay filtering + planning) ───
     print("Running CLIPSeg segmentation…")
-    segmenter = TraversabilitySegmenter()
-    pix_labels, _ = segmenter.classify(
-        img_rgb, traversable_prompts=["the floor"], untraversable_prompts=[""], threshold=0.48)
+    pix_labels = segment_frame(img_rgb)
     grid, meta = mask_to_occupancy(pix_labels, _RESOLUTION, camera=camera)
     print(f"Occupancy grid: {meta['width']}×{meta['height']} cells @ {meta['resolution']} m/cell")
 
@@ -355,7 +342,8 @@ def main() -> None:
     # model may pick any label and we rely on it choosing sensibly (the planner projects picks to free
     # cells). Pass allowed_labels=... to _call_planner_vlm to re-enable the free-cell enum.
     routes, usage = _call_planner_vlm(instructions, map_b64, result_key, args.model, args.temperature,
-                                      list(robot_world_xy), cot=cot, out_dir=args.out)
+                                      list(robot_world_xy), cot=cot, out_dir=args.out,
+                                      controller=task_type)
 
     # ── Grid CSV (shared across robots) ───────────────────────────────────
     csv_path = _CONFIG_DIR / "grid_cell_centers.csv"

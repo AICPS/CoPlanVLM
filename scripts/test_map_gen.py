@@ -31,8 +31,7 @@ from PIL import Image as PILImage
 from coord_transform import gazebo_to_ned, ned_to_world
 from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
                                render_inflation_overlay, RESOLUTION as _RESOLUTION)
-from node_Executive_API.map_gen import (render_battleship_map, render_grid_points_map,
-                                        _SEG_PROMPTS, _SEG_THRESHOLD)
+from node_Executive_API.map_gen import render_battleship_map, render_grid_points_map
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PKG_DIR    = _SCRIPT_DIR.parent
@@ -66,9 +65,9 @@ def main() -> None:
     print(f"  Saved -> {_OUT_DIR / 'battleship.png'}")
 
     print("\n[2/2] Running CLIPSeg (first run loads the model)...")
-    from obs_seg.segmenter import TraversabilitySegmenter
+    from obs_seg.segmenter import segment_frame
     rgb = np.array(img.convert("RGB"))
-    pix_labels, _ = TraversabilitySegmenter().classify(rgb, _SEG_PROMPTS, [], _SEG_THRESHOLD)
+    pix_labels = segment_frame(rgb)
     unique, counts = np.unique(pix_labels, return_counts=True)
     print(f"  pix_labels {pix_labels.shape}  [{', '.join(f'{v}:{n}' for v, n in zip(unique, counts))}]")
 

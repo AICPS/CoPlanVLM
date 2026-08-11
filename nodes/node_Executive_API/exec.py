@@ -11,8 +11,10 @@ reply shape is guaranteed by decoding rather than requested in prose:
    `classifier_schema()` enum makes any other answer impossible.
 2. **Planner** — a vision call that, given the selected per‑task system
    prompt and the `marked_obs` overlay image, returns the route(s) under
-   `route_schema()`. Chain‑of‑thought is always on: the schema declares a
-   leading `reasoning` field, so the model reasons BEFORE emitting routes.
+   `route_schema()`. Chain‑of‑thought is always on: the schema declares one
+   required field per reasoning step (prompt_gen.COT_FIELDS for the task
+   type) ahead of the routes, so the model works through every step, in
+   order, BEFORE emitting routes — and cannot silently skip one.
 
 Publishes:
 
@@ -55,6 +57,7 @@ from node_Executive_API.prompt_gen import (
     TASK_ROUTING,
     PRODUCTION_MAP_OVERLAY,
     classifier_prompt,
+    reasoning_text,
 )
 from node_Executive_API.map_gen import run_segmentation, _node_to_pil
 
@@ -271,7 +274,8 @@ class ExecutiveApiNode(Node):
                         "type": "json_schema",
                         "name": "route_plan",
                         "strict": True,
-                        "schema": route_schema(result_key, self.robot_names, cot=True),
+                        "schema": route_schema(result_key, self.robot_names, cot=True,
+                                               controller=self.current_task_type),
                     }
                 },
             )
@@ -318,10 +322,11 @@ class ExecutiveApiNode(Node):
             self.path_pub.publish(path_msg)
 
             # Log through ROS logger (INFO). Reasoning first — it is what the routes were derived
-            # from, and the schema makes the model generate it in that order.
-            reasoning = result.get('reasoning', '')
+            # from, and the schema makes the model generate it in that order. The reply carries one
+            # field per reasoning step (COT_FIELDS for this task type); reasoning_text joins them.
+            reasoning = reasoning_text(result, self.current_task_type)
             if reasoning:
-                self.get_logger().info(f"[exec] reasoning: {reasoning}")
+                self.get_logger().info(f"[exec] reasoning:\n{reasoning}")
             # Report the task type as well as the planner: nav2point and maneuver both route to
             # "astar", so the planner name alone does not identify the chosen category — and in
             # dynamic mode the classification line only prints once per prompt, not per replan.

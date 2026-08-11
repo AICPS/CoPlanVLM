@@ -18,6 +18,11 @@ from coord_transform import ned_to_world_pose, yaw_from_quaternion, wrap_to_pi
 DEFAULT_MAX_LINEAR_VEL = 0.15     # m/s   — forward speed clamp (conservative for bring-up)
 DEFAULT_MAX_ANGULAR_VEL = 0.3    # rad/s — turn-rate clamp (conservative for bring-up)
 DEFAULT_HEADING_GATE_DEG = 45.0   # deg   — only drive forward once heading error is within this
+# rad/s per rad of heading error. Saturates max_angular_vel at |yaw_error| = 0.3/1.5 = 0.2 rad
+# (11.5 deg), so behaviour above that angle is unchanged and the gain only shapes the final
+# approach. Below it the heading settles first-order with time constant 1/1.5 = 0.67 s; the
+# discrete step gain is 1.5 * 0.1 s = 0.15, far from the 2/dt oscillation limit.
+DEFAULT_KP_YAW = 1.5             # rad/s per rad
 
 
 class ControlNode(Node):
@@ -44,21 +49,23 @@ class ControlNode(Node):
         # emits NED). The controller converts NED -> world and runs the PID in the world frame,
         # where +yaw is CCW and matches the robot's angular.z — no per-frame switch or sign hack.
 
-        # kP constant value.
-        self.kP_val = 0.5
+        # kP constant value. kP_pos is m/s per metre of position error.
         self.kP_pos = 0.75
 
         # Tunable knobs (defaults live at the top of this file). All are ROS parameters, so they
         # can be overridden from the launch file or at runtime without a rebuild.
         # - max_linear_vel / max_angular_vel: conservative output clamps applied before publishing.
         # - heading_gate_deg: only drive forward once |heading error| is within this angle.
+        # - kp_yaw: heading gain, rad/s per rad (see DEFAULT_KP_YAW).
         self.declare_parameter("max_linear_vel", DEFAULT_MAX_LINEAR_VEL)      # m/s
         self.declare_parameter("max_angular_vel", DEFAULT_MAX_ANGULAR_VEL)    # rad/s
         self.declare_parameter("heading_gate_deg", DEFAULT_HEADING_GATE_DEG)  # deg
+        self.declare_parameter("kp_yaw", DEFAULT_KP_YAW)                      # rad/s per rad
         self.max_linear_vel = self.get_parameter("max_linear_vel").get_parameter_value().double_value
         self.max_angular_vel = self.get_parameter("max_angular_vel").get_parameter_value().double_value
         self.heading_gate_rad = math.radians(
             self.get_parameter("heading_gate_deg").get_parameter_value().double_value)
+        self.kp_yaw = self.get_parameter("kp_yaw").get_parameter_value().double_value
 
         # Holds the error between the current pose & goal pose readings
         self.pose_error = None
@@ -137,9 +144,11 @@ class ControlNode(Node):
 
     def publish_velocity(self):
         """Publishes the linear and angular velocity commands to the hardware."""
-        # yaw_error is already wrapped to [-pi, pi]; kP_val is tuned in degrees.
-        yaw_error_deg = self.yaw_error * (180 / math.pi)
-        self.command.angular.z = self.kP_val * yaw_error_deg
+        # yaw_error is already wrapped to [-pi, pi] by orientation_error_calc; kp_yaw is rad/s per
+        # rad, matching angular.z's rad/s (REP-103). The previous gain multiplied a DEGREE value,
+        # making the effective gain 0.5 * 180/pi = 28.6 rad/s per rad — it saturated max_angular_vel
+        # at 0.6 deg of error, so the controller was bang-bang and the gain itself inert.
+        self.command.angular.z = self.kp_yaw * self.yaw_error
 
         # Calculate and initiate forward movement of the robot.
         car = self.pose_error.pose.position
@@ -173,27 +182,6 @@ class ControlNode(Node):
 
         # Publish the updated velocity command values to the bot.
         self.velocity_publisher.publish(self.command)
-
-    # def publish_velocity(self):
-    #     # Keep yaw error in radians
-    #     yaw_error = self.yaw_error
-        
-    #     # Wrap to [-pi, pi]
-    #     while yaw_error > math.pi:
-    #         yaw_error -= 2 * math.pi
-    #     while yaw_error < -math.pi:
-    #         yaw_error += 2 * math.pi
-
-    #     self.command.angular.z = self.kP_val * yaw_error
-
-    #     car = self.pose_error.pose.position
-    #     distance = math.sqrt(car.x ** 2 + car.y ** 2)
-    #     self.command.linear.x = self.kP_pos * distance
-
-    #     self.velocity_publisher.publish(self.command)
-
-    #     if distance < 0.1:
-    #         self.parked = True
 
 
 def main(args=None):

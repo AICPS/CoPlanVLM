@@ -6,10 +6,12 @@ the overhead overlay best suited to that behavior via the ``render_*`` functions
 extract the live camera frame off the ``ExecutiveApiNode`` (``node.camera_image``, ``node.bridge``,
 ``node.camera_matrix``, ``node.dist_coeffs``). Static map assets are loaded and cached here.
 
-CLIPSeg lives here (not in translator_node.py). ``run_segmentation(node)`` is called by exec once per
-replan tick; it runs CLIPSeg on the current camera frame, stores ``node.pix_labels``, and writes
-the result to ``_OCC_FILE`` so that translator_node.py can read it instead of running its own instance.
-This keeps the model in one process and avoids a ROS topic for the occupancy data.
+Segmentation is driven from here (not from translator_node.py). ``run_segmentation(node)`` is called
+by exec once per replan tick; it undistorts the current camera frame, segments it via
+``obs_seg.segmenter.segment_frame`` (which owns the prompts/threshold and is the SAME call the
+offline harnesses make), stores ``node.pix_labels``, and writes the result to ``_OCC_FILE`` so that
+translator_node.py can read it instead of running its own instance. This keeps the model in one
+process and avoids a ROS topic for the occupancy data.
 """
 
 from __future__ import annotations
@@ -58,8 +60,6 @@ _ROBOT_COLORS  = [                  # per-robot colors (RGB), cycled by index
 # belongs to which robot, so these must stay index-aligned with the tuples above — otherwise the
 # prompt would describe a colour the image does not draw.
 ROBOT_COLOR_NAMES = ("magenta", "light blue", "orange", "green")
-_SEG_PROMPTS   = ["the floor"]
-_SEG_THRESHOLD = 0.48
 
 # Label font (loaded once): DejaVuSans at _LABEL_SIZE, falling back to PIL's default if unavailable.
 try:
@@ -69,14 +69,9 @@ except OSError:
     _LABEL_FONT = ImageFont.load_default()
 
 # Occupancy-grid parameters (resolution, inflation radius) are the single source of truth in
-# obs_seg.occupancy (RESOLUTION, INFLATION_RADIUS) — not duplicated here.
-
-
-@lru_cache(maxsize=1)
-def _get_segmenter():
-    """Load TraversabilitySegmenter (CLIPSeg) once on first call; deferred import."""
-    from obs_seg.segmenter import TraversabilitySegmenter
-    return TraversabilitySegmenter()
+# obs_seg.occupancy (RESOLUTION, INFLATION_RADIUS) — not duplicated here. Likewise the segmentation
+# prompts/threshold live in obs_seg.segmenter (SEG_TRAVERSABLE, SEG_UNTRAVERSABLE, SEG_THRESHOLD),
+# reached only through segment_frame().
 
 
 @lru_cache(maxsize=1)
@@ -112,7 +107,11 @@ def run_segmentation(node) -> None:
     if node.camera_matrix is not None and node.dist_coeffs is not None:
         cv_img = cv2.undistort(cv_img, node.camera_matrix, node.dist_coeffs)
     rgb = cv2.cvtColor(cv_img, cv2.COLOR_RGBA2RGB)
-    pix_labels, _ = _get_segmenter().classify(rgb, _SEG_PROMPTS, [], _SEG_THRESHOLD)
+    # Deferred import: obs_seg.segmenter imports torch at module level, and this module is pulled in
+    # at startup by debug_io and prompt_gen (hence by the Path Translator node, which never
+    # segments). Importing here keeps torch out of those processes.
+    from obs_seg.segmenter import segment_frame
+    pix_labels = segment_frame(rgb)
     node.pix_labels = pix_labels
 
     grid, meta = mask_to_occupancy(pix_labels, RESOLUTION, camera=node.camera_name)

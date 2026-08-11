@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 from pathlib import Path
 from typing import Dict, List
@@ -39,7 +40,9 @@ from ament_index_python.packages import get_package_share_directory
 
 import debug_io
 from coord_transform import ned_to_world
-from obs_seg.occupancy import render_inflation_overlay
+from obs_seg import OCCUPIED
+from obs_seg.occupancy import render_inflation_overlay, world_to_cell, cell_to_world
+from .grid_planner_utils import project_to_free
 # Which overlay the VLM saw — needed so vlm_selections.png is drawn in the matching style.
 # /vlm_plan does not carry it, so both nodes read it from the shared prompt_gen constant.
 from node_Executive_API.prompt_gen import PRODUCTION_MAP_OVERLAY
@@ -83,6 +86,11 @@ class SimplePathTranslator(Node):
         self.declare_parameter("save_debug", True)
         self.declare_parameter("debug_dir", "")                 # set by launch; empty = off
 
+        # Minimum distance (metres) between two robots' FINAL goals. The VLM often sends both robots
+        # to the same location; when a later-planned robot's goal falls within this radius of one
+        # already claimed, its goal is displaced to the nearest free cell outside. 0 disables it.
+        self.declare_parameter("min_goal_separation", 0.5)
+
         # ─── Planner knobs (astar + coverage) ────────────────────────────────
         # The planner is chosen per message (from the /vlm_plan "planner" field), not by a param.
         for k, v in {**ASTAR_PARAMS, **COVERAGE_PARAMS}.items():
@@ -100,6 +108,7 @@ class SimplePathTranslator(Node):
 
         self.save_debug = self.get_parameter("save_debug").value
         self.debug_dir = self.get_parameter("debug_dir").value
+        self.min_goal_separation = float(self.get_parameter("min_goal_separation").value)
 
         # All planner tunables gathered into one dict, passed to the per-message planner's
         # plan()/save_debug(). The planner module itself is selected per message in _on_path_msg.
@@ -149,6 +158,43 @@ class SimplePathTranslator(Node):
         def _cb(msg: PoseStamped) -> None:
             self.robot_xy[name] = ned_to_world(msg.pose.position.x, msg.pose.position.y)
         return _cb
+
+    # ------------------------------------------------------------------
+    def _separate_goal(self, goal_xy, claimed, infl, meta, max_shift):
+        """Nearest free cell to `goal_xy` that is >= min_goal_separation from every claimed goal.
+
+        Returns a world (x, y) — `goal_xy`'s own cell centre when it is already clear — or None if
+        no acceptable cell lies within `max_shift` metres, in which case the caller keeps the
+        original goal and warns.
+
+        A scratch COPY of the inflated grid gets a disc of radius min_goal_separation stamped
+        OCCUPIED around each claimed goal, then project_to_free's BFS ring search finds the nearest
+        cell that is neither an obstacle nor inside a claimed disc — one search handles both. `infl`
+        itself is never modified: the grid A* searches afterwards is untouched, so a robot may still
+        travel THROUGH another's claimed disc and a parked robot never blocks a corridor.
+
+        `max_shift` bounds the displacement. It is needed because adjusting the reference before
+        planning bypasses astar_proj's own projection_radius check (by then the cell is already free,
+        so its measured displacement is zero); without it a goal could slide far off target to
+        escape a disc.
+        """
+        h, w = infl.shape
+        res = meta["resolution"]
+        scratch = infl.copy()
+        yy, xx = np.ogrid[0:h, 0:w]
+        r2 = (self.min_goal_separation / res) ** 2
+        for (cx_w, cy_w) in claimed:
+            cx, cy = world_to_cell(cx_w, cy_w, meta)
+            scratch[((xx - cx) ** 2 + (yy - cy) ** 2) <= r2] = OCCUPIED
+
+        goal_cell = world_to_cell(goal_xy[0], goal_xy[1], meta)
+        cell = project_to_free(scratch, goal_cell)
+        if cell is None:
+            return None
+        shift = math.hypot((cell[0] - goal_cell[0]) * res, (cell[1] - goal_cell[1]) * res)
+        if shift > max_shift:
+            return None
+        return cell_to_world(cell[0], cell[1], meta)
 
     # ------------------------------------------------------------------
     def _snapshot_frame(self, snap) -> np.ndarray | None:
@@ -279,6 +325,26 @@ class SimplePathTranslator(Node):
         world_paths: Dict[str, list] = {}
         overlay = None
 
+        # ─── Goal separation: reserve the poses of robots that will NOT move ──────────────────
+        # A robot holding position still occupies its cell, so a mover must not be routed onto it.
+        # This runs BEFORE the loop because claiming inside it would be too late: if the stationary
+        # robot happened to be planned second, the mover's colliding path would already have been
+        # published. Reserving up front also makes the outcome independent of `routes` key order.
+        # "Will not move" covers an empty label list ("stay in place"), a robot the model omitted,
+        # and a malformed route — the robot is physically there in every case.
+        claimed: List[tuple] = []
+        if self.min_goal_separation > 0:
+            for rname in self.robot_names:
+                route = plans.get(rname)
+                if isinstance(route, list) and route:
+                    continue                      # moving; its goal is claimed after it plans
+                pose = self.robot_xy.get(rname)
+                if pose is None:
+                    self.get_logger().warn(
+                        f"[{rname}] holding position but no pose received yet; cannot reserve it.")
+                    continue
+                claimed.append(pose)
+
         # Robot-independent artifacts: written ONCE per plan at the debug_dir top level, not once
         # per robot (they are byte-identical for every robot — ~15 MB of redundant PNG encoding).
         # Done BEFORE the loop so the frame and the occupancy view exist even when no robot manages
@@ -304,6 +370,28 @@ class SimplePathTranslator(Node):
                 self.get_logger().warn(f"[{name}] No valid waypoints in route; nothing to plan.")
                 continue
 
+            # build_reference prepends this robot's own pose, so len(ref) >= 2 means it has an
+            # actual destination; a length-1 ref is "stay in place" (already reserved above).
+            moving = len(ref) >= 2
+
+            # Displace the goal off any already-claimed goal BEFORE planning, so A* runs once and
+            # the debug figures describe the executed route with no extra plumbing. Only the final
+            # reference point moves — intermediate waypoints and the route itself are untouched.
+            if moving and planner_name == "astar" and self.min_goal_separation > 0 and claimed:
+                adjusted = self._separate_goal(
+                    ref[-1], claimed, ctx["infl"], meta,
+                    max_shift=float(self.plan_params["projection_radius"]))
+                if adjusted is None:
+                    self.get_logger().warn(
+                        f"[{name}] goal is within {self.min_goal_separation:.2f} m of another robot "
+                        "and no free cell far enough away was found; keeping the original goal.")
+                elif math.dist(adjusted, ref[-1]) > 1e-9:
+                    self.get_logger().info(
+                        f"[{name}] goal moved {math.dist(adjusted, ref[-1]):.2f} m to clear another "
+                        f"robot: ({ref[-1][0]:.2f}, {ref[-1][1]:.2f}) -> "
+                        f"({adjusted[0]:.2f}, {adjusted[1]:.2f})")
+                    ref[-1] = adjusted
+
             world_path, dbg = planner.plan(ref, ctx, meta, self.plan_params)
             for w in dbg.get("warnings", []):
                 self.get_logger().warn(f"[{name}] {w}")
@@ -313,6 +401,10 @@ class SimplePathTranslator(Node):
 
             self._publish(name, world_path, cur_xy)
             world_paths[name] = world_path
+            if moving:
+                # The EXECUTED endpoint, not the adjusted reference: plan() may project it further,
+                # and what the next robot must avoid is where this one actually stops.
+                claimed.append(world_path[-1])
             self.get_logger().info(
                 f"[{name}] Planned path: {len(world_path)} waypoints "
                 f"(grid {meta['width']}x{meta['height']} @ {meta['resolution']} m, "

@@ -68,7 +68,7 @@ You will be shown an overhead camera image of the environment with a map overlay
 The two robots — identify each by its appearance in the image:
 %ROBOT_ROSTER%
 
-Locate each robot in the image before planning. General rules that apply to all tasks:
+General rules that apply to all tasks:
 - You MUST include BOTH robots in every response, even if the instruction only mentions one.
   A robot with no task holds its position: return an empty list for each robot that should not move.
 """
@@ -81,7 +81,7 @@ Locate each robot in the image before planning. General rules that apply to all 
 _POINTS_OVERLAY = """\
 MAP OVERLAY — Set of Marks:
 The image shows blue dots at a regular grid of candidate locations, each labeled with an alphanumeric
-identifier. The grid has exactly 14 columns (A–N, left to right) and 8 rows (1–8, top to bottom),
+identifier. The grid has exactly 14 columns (A-N, left to right) and 8 rows (1-8, top to bottom),
 giving points like "A1", "H4", "N8". Columns never go past N and rows never go past 8.
 A dot is placed at every grid point regardless of what lies beneath it, so a dot may fall on an
 obstacle — use the image to judge which points are on clear, reachable floor and choose destinations
@@ -91,24 +91,20 @@ beyond N, no row beyond 8, e.g. "G9" or "P4" do not exist)."""
 
 _MARKED_OBS_OVERLAY = """\
 MAP OVERLAY — Set of Marks with Impassable Points:
-The image shows a labeled mark at every point of a regular grid with exactly 14 columns (A–N, left to
-right) and 8 rows (1–8, top to bottom), giving points like "A1", "H4", "N8". Columns never go past N
+The image shows a labeled mark at every point of a regular grid with exactly 14 columns (A-N, left to
+right) and 8 rows (1-8, top to bottom), giving points like "A1", "H4", "N8". Columns never go past N
 and rows never go past 8. Each mark has one of two forms:
 - a BLUE DOT marks a FREE point the robot CAN navigate to;
 - a RED X marks a point that is NOT passable — the robot CANNOT stand on or travel through a red X
-  point (it is blocked/occupied).
-A red X ONLY means that point is impassable because an object has been percieved there; it does NOT tell you what is there.
-It is likely although not guaranteed that objects refered to in the user instruction will be marked by a red X.
-Identify the objects and targets named in the instruction from the image itself, not from the red X marks.
-Every mark, blue or red, is labeled with its alphanumeric identifier.
+  point (it is blocked/occupied). Red X marks will often mark objects of interest.
 Choose robot destinations and routes ONLY from blue-dot points.
 NEVER invent or select a point outside the grid (no column beyond N, no row beyond 8, e.g. "G9" or
 "P4" do not exist)."""
 
 _BATTLESHIP_OVERLAY = """\
 MAP OVERLAY — Battleship Grid:
-The image shows a grid overlaid on the environment with exactly 14 columns (A–N, left to right) and
-8 rows (1–8, top to bottom), giving cells such as "A1", "H4", "N8". Columns never go past N and rows
+The image shows a grid overlaid on the environment with exactly 14 columns (A-N, left to right) and
+8 rows (1-8, top to bottom), giving cells such as "A1", "H4", "N8". Columns never go past N and rows
 never go past 8.
 NEVER invent or select a cell outside the grid (no column beyond N, no row beyond 8, e.g. "G9" or
 "P4" do not exist)."""
@@ -149,7 +145,7 @@ _MANEUVER_EXPLAIN = """\
 YOUR TASK:
 Plan a specific route for each robot as an ordered list of waypoints, chosen from the labeled locations
 shown in the overlay. The route taken matters — follow the constraints in the instruction (loops,
-avoidance corridors, formations, etc.). Step between locations that are adjacent/close together to draw
+avoidance corridors, formations, etc.). Step between locations that have clear paths between them to draw
 a coherent path.
 
 OUTPUT FORMAT (exactly one JSON object):
@@ -244,8 +240,7 @@ _RED_MARKER_SUBSTEP = """\
 _MANEUVER_COT = """\
 CoT REASONING STEPS — Before choosing routes, work through these in the "reasoning" field, in order.
 A path planner will connect your consecutive waypoints with a collision-free path, so give only the KEY
-waypoints that define the maneuver's shape — do NOT list every adjacent cell or hand-trace around
-obstacles (skipping cells is expected).
+waypoints that define the maneuver's shape.
 
 1) Identify and locate the robots and key objects in the scene.
    a) Robots: give %ROBOT_A%'s and %ROBOT_B%'s current position as the labeled grid point nearest each robot
@@ -253,7 +248,7 @@ obstacles (skipping cells is expected).
    b) Task features: list everything the instruction requires you to perceive to carry out the task —
       not only goal objects, but also boundaries or lines to avoid/not cross (e.g. caution tape),
       regions to stay within or out of, and landmarks to go around. Give the grid label(s) each one
-      occupies or spans (e.g. "yellow box: H8", "caution tape: E4-E7", "chair to loop: C4").
+      occupies or spans (e.g. "yellow box: H8", "caution tape: E4-E7", "box: C4, D4, C3, D3").
 %RED_MARKER_STEP%
 2) Split the instruction into one subtask per robot, naming which robot (%ROBOT_A% or %ROBOT_B%) performs each.
    Keep every spatial constraint and landmark named in the instruction — words like behind / around /
@@ -265,22 +260,59 @@ obstacles (skipping cells is expected).
    theirs; to go "around" or "behind" an object, name the free corridor cells along the required side
    (e.g. an object spanning F3-H3 -> pass above it via F2, G2, H2)
    (e.g. an object at B5 -> approach from right via C5, B5).
-5) For each robot, break its subtask into ordered legs, each with a short purpose, giving only the KEY
-   waypoint(s) that realize it (include its start from 1a and its final goal cell). Do NOT choose a leg
-   waypoint that is on an avoid location from step 4. For a loop or circuit around an object, give
+4) For each robot, break its subtask into ordered legs, each with a short purpose, giving only the KEY
+   waypoint(s) that realize it (include its start from 1a and its final goal cell).
+   For a loop or circuit around an object, give
    waypoints on several DIFFERENT sides of it (not just the far side), so the route encircles the object
    instead of going out and doubling back the same way:
       leg 1 <purpose>: <label(s)>   ...   leg N <purpose>: <label(s)>
    Example — "%ROBOT_A%: loop around the chair at C4 and return to its start at A7":
       leg 1 approach the chair: C5 ; leg 2 circle it via each side: D4, C3, B4, C5 ;
       leg 3 return to start: A7
-6) Assemble each robot's route as a SHORT ordered list of the key waypoints from step 5 (start -> legs
+5) Assemble each robot's route as a SHORT ordered list of the key waypoints from step 4 (start -> legs
    -> final goal). Keep it sparse: consecutive waypoints may be far apart and the planner fills the gaps
-   collision-free. Never place a waypoint on an avoid location from step 4.
-7) Verify and fix before writing the JSON: the route starts at the robot, follows the legs in order,
-   ends at the final goal, avoids every step-4 location, and truly satisfies the spatial constraint
+   collision-free.
+6) Verify and fix before writing the JSON: the route starts at the robot, follows the legs in order,
+   ends at the final goal, and truly satisfies the spatial constraint
    (correct side of the landmark). Then put the route into the route object using the prescribed
    output structure."""
+
+# controller -> ordered (field_name, description) for the reply's per-step reasoning fields, mirroring
+# the numbered steps of that controller's COT_BLOCKS entry above. route_schema declares them in this
+# order, so the model fills each step in sequence BEFORE emitting routes, and strict mode makes every
+# one mandatory — a step cannot be silently skipped the way it could with one big "reasoning" string.
+#
+# Swap a task category's reasoning format by editing its entry here (and its COT_BLOCKS prose): the
+# per-category selection is the same mechanism COT_BLOCKS uses, so the three categories stay
+# independent. Collapsing an entry to a single ("reasoning", ...) pair restores the old behaviour for
+# that category alone.
+#
+# The field count MUST equal the number of numbered steps in the matching block; the descriptions are
+# short restatements, since the block itself carries the detailed guidance.
+COT_FIELDS = {
+    "nav2point": [
+        ("step1_locate_targets", "Objects/locations named in the instruction, each with its grid label(s)."),
+        ("step2_choose_points",  "The alphanumeric points the robots should travel to."),
+        ("step3_check_blocked",  "For each desired point: whether it is blocked, the free point used "
+                                 "instead and the direction, and which robot is nearest."),
+    ],
+    "maneuver": [
+        ("step1_locate",     "a) each robot's current grid point; b) task features (goals, boundaries "
+                             "to avoid, landmarks) with the label(s) each occupies or spans."),
+        ("step2_subtasks",   "One subtask per robot, keeping every spatial constraint and landmark."),
+        ("step3_ground",     "Spatial words turned into concrete cells (far side, between, around)."),
+        ("step4_legs",       "Per robot: ordered legs with a short purpose and only the KEY waypoints."),
+        ("step5_assemble",   "Per robot: the short ordered route from start through the legs to the goal."),
+        ("step6_verify",     "Check the route starts at the robot, follows the legs, ends at the goal "
+                             "and satisfies the spatial constraint; fix it if not."),
+    ],
+    "coverage": [
+        ("step1_relevant_objects", "Objects/regions named and their locations, plus each robot's "
+                                   "initial position on the map."),
+        ("step2_select_regions",   "All regions the robots should cover or visit."),
+        ("step3_robot_assignment", "How those regions divide evenly between the robots."),
+    ],
+}
 
 # controller -> its chain-of-thought block. Total over CONTROLLERS (validated in generate_prompt).
 COT_BLOCKS = {
@@ -288,6 +320,25 @@ COT_BLOCKS = {
     "maneuver":  _MANEUVER_COT,
     "coverage":  _COVERAGE_COT,    # TODO: custom block (copy of generic for now)
 }
+
+# Every controller must have both a prose block and a matching set of reply fields.
+assert set(COT_FIELDS) == set(COT_BLOCKS) == set(CONTROLLERS), (
+    "COT_FIELDS / COT_BLOCKS / CONTROLLERS disagree: "
+    f"{sorted(COT_FIELDS)} / {sorted(COT_BLOCKS)} / {sorted(CONTROLLERS)}")
+
+
+def reasoning_text(result: dict, controller: str) -> str:
+    """Join a planner reply's per-step reasoning fields into one readable block, in step order.
+
+    `result` is the decoded reply; `controller` selects which COT_FIELDS list to read. Fields absent
+    from the reply are skipped, so a cot=False reply (no reasoning fields at all) yields "" rather
+    than raising — callers can treat the empty string as "nothing to report".
+
+    Shared by exec.py's log line and the offline harness's terminal output so the two render the
+    trace identically.
+    """
+    fields = COT_FIELDS.get(controller, ())
+    return "\n".join(f"{name}: {result[name]}" for name, _ in fields if result.get(name))
 
 
 def _operator_line(instruction: str) -> str:
@@ -431,7 +482,7 @@ def generate_prompt(instruction, controller, map_overlay_type, *,
 
 # ── Reply schemas (Responses API structured outputs) ───────────────────────────
 
-def route_schema(result_key, robot_names, cot, allowed_labels=None):
+def route_schema(result_key, robot_names, cot, allowed_labels=None, controller=None):
     """Strict JSON Schema for the PLANNER reply — enforced via Responses API structured outputs.
 
     Always: {result_key: {<robot>: [labels] for each robot}}. additionalProperties:false + a fixed
@@ -443,10 +494,17 @@ def route_schema(result_key, robot_names, cot, allowed_labels=None):
     not merely requested in the prompt. Callers currently leave it unset and let the planner project
     picks onto free cells instead (see map_gen.free_cell_labels to re-enable).
 
-    When cot=True a leading free-text "reasoning" string field is added. Structured outputs fill
-    properties in declaration order, so the model writes its full reasoning trace FIRST and the routes
-    are conditioned on it — real chain-of-thought, in one call, with the answer keys still locked.
+    When cot=True the controller's COT_FIELDS are declared as one required string field PER REASONING
+    STEP, ahead of result_key, and `controller` is therefore required. One field per step rather than a
+    single "reasoning" blob because strict mode requires every declared property: the model cannot
+    address three of six steps and leave the rest unwritten. Structured outputs also fill properties in
+    declaration order, so the steps are produced in sequence — each conditioned on the previous — and
+    the routes are conditioned on all of them. Read the trace back with reasoning_text().
     """
+    if cot and controller not in COT_FIELDS:
+        raise ValueError(
+            f"cot=True needs a controller in {tuple(COT_FIELDS)}, got {controller!r} — the reasoning "
+            "fields are per task category (see COT_FIELDS).")
     item_schema = {"type": "string"}
     if allowed_labels:
         item_schema = {"type": "string", "enum": list(allowed_labels)}
@@ -457,9 +515,10 @@ def route_schema(result_key, robot_names, cot, allowed_labels=None):
     }
     properties: dict = {}
     required: list = []
-    if cot:                                    # declared first -> generated (reasoned) first
-        properties["reasoning"] = {"type": "string"}
-        required.append("reasoning")
+    if cot:                # declared first, in step order -> generated (reasoned) first, in order
+        for fname, desc in COT_FIELDS[controller]:
+            properties[fname] = {"type": "string", "description": desc}
+            required.append(fname)
     properties[result_key] = route_obj
     required.append(result_key)
     return {"type": "object", "additionalProperties": False,
