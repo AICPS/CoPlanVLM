@@ -64,6 +64,10 @@ from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
 from node_Path_Translator import astar_proj, coverage_proj
 from node_Path_Translator.astar_proj import PARAMS as ASTAR_PARAMS
 from node_Path_Translator.coverage_proj import PARAMS as COVERAGE_PARAMS
+# Same helper and same default the live translator node uses, so the routes drawn here are the
+# routes the robots would execute (see grid_planner_utils.separate_goal).
+from node_Path_Translator.grid_planner_utils import (
+    DEFAULT_MIN_GOAL_SEPARATION as MIN_GOAL_SEPARATION, separate_goal)
 
 from node_Executive_API.prompt_gen import (
     generate_prompt, route_schema, classifier_schema,
@@ -353,6 +357,22 @@ def main() -> None:
 
     params = {**ASTAR_PARAMS, **COVERAGE_PARAMS}
 
+    # ── Goal separation: reserve the poses of robots that will NOT move ───
+    # Mirrors node_Path_Translator so this harness plans the routes the robots would actually
+    # execute — without it, two robots sent to one target both terminate on the same cell and
+    # robot_paths_waypoints.png shows a plan that could never run. A robot holding position still
+    # occupies its cell, so it is claimed BEFORE the loop: claiming inside would be too late if it
+    # happened to be visited second, and reserving up front makes the outcome independent of
+    # `routes` key order. "Will not move" covers an empty label list, a malformed route, and a
+    # robot with no pose.
+    claimed: list = []
+    for name, labels in routes.items():
+        if isinstance(labels, list) and labels and name in robot_world_xy:
+            continue                                  # moving; its goal is claimed after it plans
+        pose = robot_world_xy.get(name)
+        if pose is not None:
+            claimed.append(pose)
+
     # ── Plan per robot + write debug images ───────────────────────────────
     path_lengths: dict[str, float] = {}
     world_paths: dict[str, list] = {}
@@ -374,6 +394,22 @@ def main() -> None:
             print(f"[{name}] fewer than 2 reference points after filtering; skipping.")
             continue
 
+        # Displace the goal off any already-claimed goal BEFORE planning, so A* runs once and the
+        # debug figures describe the executed route. Only the final reference point moves —
+        # intermediate waypoints and the route itself are untouched.
+        if planner_name == "astar" and MIN_GOAL_SEPARATION > 0 and claimed:
+            adjusted = separate_goal(ref[-1], claimed, infl, meta,
+                                     min_separation=MIN_GOAL_SEPARATION,
+                                     max_shift=float(params["projection_radius"]))
+            if adjusted is None:
+                print(f"[{name}] goal is within {MIN_GOAL_SEPARATION:.2f} m of another robot and no "
+                      "free cell far enough away was found; keeping the original goal.")
+            elif math.dist(adjusted, ref[-1]) > 1e-9:
+                print(f"[{name}] goal moved {math.dist(adjusted, ref[-1]):.2f} m to clear another "
+                      f"robot: ({ref[-1][0]:.2f}, {ref[-1][1]:.2f}) -> "
+                      f"({adjusted[0]:.2f}, {adjusted[1]:.2f})")
+                ref[-1] = adjusted
+
         print(f"[{name}] Planning with {planner_name} ({len(ref)} reference pts)…")
         world_path, dbg = planner.plan(ref, ctx, meta, params)
         for w in dbg.get("warnings", []):
@@ -386,6 +422,9 @@ def main() -> None:
         length = _path_length(world_path)
         path_lengths[name] = length
         world_paths[name] = world_path
+        # The EXECUTED endpoint, not the adjusted reference: plan() may project it further, and
+        # what the next robot must avoid is where this one actually stops.
+        claimed.append(world_path[-1])
         print(f"[{name}] {len(world_path)} waypoints: "
               f"start=({world_path[0][0]:.3f}, {world_path[0][1]:.3f})  "
               f"end=({world_path[-1][0]:.3f}, {world_path[-1][1]:.3f})  "

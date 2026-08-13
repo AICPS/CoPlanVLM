@@ -83,6 +83,9 @@ MAP OVERLAY — Set of Marks:
 The image shows blue dots at a regular grid of candidate locations, each labeled with an alphanumeric
 identifier. The grid has exactly 14 columns (A-N, left to right) and 8 rows (1-8, top to bottom),
 giving points like "A1", "H4", "N8". Columns never go past N and rows never go past 8.
+Directions are cardinal and fixed to the image: WEST/LEFT is a lower column letter (A1 is west of
+B1), EAST/RIGHT a higher one (H2 is east of G2), NORTH/UP a lower row number (C3 is north of C5),
+and SOUTH/DOWN a higher one.
 A dot is placed at every grid point regardless of what lies beneath it, so a dot may fall on an
 obstacle — use the image to judge which points are on clear, reachable floor and choose destinations
 only from those.
@@ -93,7 +96,11 @@ _MARKED_OBS_OVERLAY = """\
 MAP OVERLAY — Set of Marks with Impassable Points:
 The image shows a labeled mark at every point of a regular grid with exactly 14 columns (A-N, left to
 right) and 8 rows (1-8, top to bottom), giving points like "A1", "H4", "N8". Columns never go past N
-and rows never go past 8. Each mark has one of two forms:
+and rows never go past 8.
+Directions are cardinal and fixed to the image: WEST/LEFT is a lower column letter (A1 is west of
+B1), EAST/RIGHT a higher one (H2 is east of G2), NORTH/UP a lower row number (C3 is north of C5),
+and SOUTH/DOWN a higher one.
+Each mark has one of two forms:
 - a BLUE DOT marks a FREE point the robot CAN navigate to;
 - a RED X marks a point that is NOT passable — the robot CANNOT stand on or travel through a red X
   point (it is blocked/occupied). Red X marks will often mark objects of interest.
@@ -188,31 +195,53 @@ CONTROLLER_EXPLAIN = {
 
 _NAV2POINT_COT = """\
 CoT REASONING STEPS — Before choosing routes, work through these in the "reasoning" field, in order:
-1) Identify the objects/locations named in the operator's instruction and localize each with its grid
-   label(s) (e.g. "chair: C4", "yellow box: H8").
-2) Based off the instruction, list the alpha numeric points (e.g. B4) that the robots should travel to.
-3) For each desired point, check whether its cell is blocked (Check the the list of blocked points in the MAP_OVERLAY)): 
-   if it is blocked, list the direction the robot should be relative to the obstacle, 
-   then the nearest FREE (blue-dot) point the robot can stand on in that direction;
-   if the desired point is already free, use it as-is. Also note which robot (%ROBOT_A% or %ROBOT_B%) is currently nearest to
-   that cell (e.g. "green box E8 is blocked -> travel to D6, nearest robot %ROBOT_B%").
+1) GROUNDING — locate everything the task depends on.
+   a) Give each robot's current position as the labeled grid point nearest it in the image
+      (e.g. "%ROBOT_A%: A7", "%ROBOT_B%: D2").
+   b) Identify every object/goal location named in the operator's instruction and give its grid
+      label(s) (e.g. "chair: C4", "yellow box: H8").
+   c) %RED_MARKER_STEP%
+2) TASK ALLOCATION.
+   a) Classify the task as ONE robot (say which), BOTH, or UNSPECIFIED. "the robots"/"both"/"each"
+      means BOTH; "a robot" or a single robot name means ONE; otherwise UNSPECIFIED — divide the work
+      appropriately between them.
+   b) List every point the robots should visit, and for each one name which robot is currently closest.
+3) ROUTE CONSTRUCTION — assign the points to each robot, in visit order. Every robot chosen in 2a MUST
+   get at least one point, and if both are sent to the same target give them two DIFFERENT nearby
+   points — two robots cannot occupy one cell.
+4) VERIFICATION — for each assigned point, check whether its cell is blocked (see the blocked points
+   listed in the MAP OVERLAY): if it is blocked, give the direction that robot should be relative to the
+   obstacle, then the nearest FREE (blue-dot) point it can stand on in that direction; if the point is
+   already free, use it as-is (e.g. "%ROBOT_B% -> green box E8 is blocked -> travel to D6").
 """
 
 _COVERAGE_COT = """\
-REASONING — Before deciding the routes, work through the task in the "reasoning" field, in this order:
-1. RELEVANT OBJECTS: Identify the objects/regions named in the operator's instruction. 
-   List where they are located on the map (e.g. "chair: C4", "yellow box: H8"). 
-   List where each robot is on the map initially (e.g. "%ROBOT_A%: A7", "%ROBOT_B%: D2").
-2. SELECT_REGIONS: List all regions that the robots should cover/visit.
-3. ROBOT ASSIGNMENT: Divide the regions evenly between the two robots.
-Only after this reasoning, fill in the route object with your final choice."""
+REASONING — Before deciding the routes, work through these in the "reasoning" field, in order:
+1) GROUNDING — locate everything the task depends on.
+   a) Give each robot's current position as the labeled grid point nearest it in the image
+      (e.g. "%ROBOT_A%: A7", "%ROBOT_B%: D2").
+   b) Identify every object/region named in the operator's instruction and give the grid label(s)
+      each one occupies or spans (e.g. "chair: C4", "yellow box: H8").
+   c) %RED_MARKER_STEP%
+   d) Describe which regions the instruction requires the robots to cover or visit, then list every
+      grid region that matches that description.
+2) TASK ALLOCATION — divide the regions from 1d evenly between %ROBOT_A% and %ROBOT_B%.
+3) VERIFICATION — for each region selected in step 2, state whether it is in the blocked list given in
+   the MAP OVERLAY. For each blocked one, state WHY it was chosen, then REPLACE it with the nearby
+   free region (or regions) that best fulfills that same purpose. Every blocked region must be
+   replaced — never simply drop one. Only after this reasoning, fill in the route object with your
+   final choice."""
 
-# Inserted into _MANEUVER_COT (step 1b) only for the marked_obs overlay, which is the only overlay that
-# draws red X marks. Omitted otherwise so the model is not asked to inventory marks that do not exist.
-_RED_MARKER_SUBSTEP = """\
-   c) Label each red marker: for every red X in the image, note its label and the object at or near it
-      (it may sit beside, not directly under, the mark); write "unknown" if unclear.
-"""
+# Body of the red-marker sub-step, substituted into the %RED_MARKER_STEP% sentinel only for the
+# marked_obs overlay — the only overlay that draws red X marks. Omitted otherwise so the model is not
+# asked to inventory marks that do not exist.
+#
+# Deliberately carries NO step label: each CoT block writes its own ("   c) %RED_MARKER_STEP%"), so a
+# block is free to number it differently without touching this text. The continuation line keeps its
+# own indent, so it lines up under whatever label the caller supplies. _cot_block drops the ENTIRE
+# sentinel line when the sub-step is omitted, which is what stops a bare "c)" being left behind.
+_RED_MARKER_SUBSTEP = """Label each red marker: for every red X in the image, note its label and the object at or near it
+      (it may sit beside, not directly under, the mark); write "unknown" if unclear."""
 
 # ── Previous maneuver CoT (dense adjacent-cell path). Commented out, kept for reference. ──
 # _MANEUVER_COT = """\
@@ -245,37 +274,41 @@ waypoints that define the maneuver's shape.
 1) Identify and locate the robots and key objects in the scene.
    a) Robots: give %ROBOT_A%'s and %ROBOT_B%'s current position as the labeled grid point nearest each robot
       in the image (e.g. "%ROBOT_A%: A7", "%ROBOT_B%: D2").
-   b) Task features: list everything the instruction requires you to perceive to carry out the task —
-      not only goal objects, but also boundaries or lines to avoid/not cross (e.g. caution tape),
-      regions to stay within or out of, and landmarks to go around. Give the grid label(s) each one
-      occupies or spans (e.g. "yellow box: H8", "caution tape: E4-E7", "box: C4, D4, C3, D3").
-%RED_MARKER_STEP%
-2) Split the instruction into one subtask per robot, naming which robot (%ROBOT_A% or %ROBOT_B%) performs each.
-   Keep every spatial constraint and landmark named in the instruction — words like behind / around /
-   left of / between / via and the object they refer to. Do not shorten or drop these. If only one
-   robot is needed, write "stay" for the other.
-3) Ground the spatial words in the grid (columns A->N run left-to-right, rows 1->8 top-to-bottom).
-   Turn each constraint or goal location into concrete cells: the "far side" of an object from a robot is the side
-   across the object from that robot; "between X and Y" is the cells whose column/row fall between
-   theirs; to go "around" or "behind" an object, name the free corridor cells along the required side
-   (e.g. an object spanning F3-H3 -> pass above it via F2, G2, H2)
-   (e.g. an object at B5 -> approach from right via C5, B5).
-4) For each robot, break its subtask into ordered legs, each with a short purpose, giving only the KEY
-   waypoint(s) that realize it (include its start from 1a and its final goal cell).
+   b) Task features: list everything the instruction requires you to perceive to carry out the task.
+      Give the grid label(s) each one occupies or spans (e.g. "yellow box: H8", "caution tape: E4-E7", "box: C4, D4, C3, D3").
+   c) %RED_MARKER_STEP%
+2) Split the instruction into two subtasks, one per each robot. Do not summarize or drop any spatial constraints or landmarks — keep every word like behind / around / left of...
+   Use the robot the instruction names; if it names none, list which robot would be best. If the
+   instruction gives a robot no work, its subtask is "stay".
+   For each subtask, list the final location each robot should end at.
+      subtask 1 <subtask kept in full>: <robot> (<why that robot>), ends at <label>
+      subtask 2 <subtask kept in full>: <robot> (<why that robot>), ends at <label>
+   Example — "have one robot wait behind the chair at C4 while the other approaches the person at H8
+   from the west":
+      subtask 1 wait behind the chair at C4: %ROBOT_B% (already at C2, nearest), ends at C3
+      subtask 2 approach the person at H8 from the west: %ROBOT_A% (already at F7, nearest), ends at G8
+   Example — "have %ROBOT_A% loop around the chair at C4 and then travel to %ROBOT_B%":
+      subtask 1 loop around the chair at C4 and then travel to %ROBOT_B%: %ROBOT_A% (named in the
+      instruction), ends at B7 (beside %ROBOT_B%, which is at A7)
+      subtask 2 stay: %ROBOT_B% (the instruction gives it no work), ends at A7 where it already is,
+      so its route is empty
+3) For each robot, break its subtask into ordered legs, each with a clear and detailed description, giving only the KEY
+   waypoint(s) that realize it. Turn each spatial constraint into concrete cells on the REQUIRED SIDE:
+      (e.g. an object spanning F3-H3 -> pass north/above it via F2, G2, H2)
+      (e.g. an object at B5 -> approach from east/right via C5, B5)
    For a loop or circuit around an object, give
    waypoints on several DIFFERENT sides of it (not just the far side), so the route encircles the object
    instead of going out and doubling back the same way:
+      (e.g. an object at G5, G6, F6 -> loop around it via F5,G4,H5,H6,G7,E6,F5)
       leg 1 <purpose>: <label(s)>   ...   leg N <purpose>: <label(s)>
    Example — "%ROBOT_A%: loop around the chair at C4 and return to its start at A7":
       leg 1 approach the chair: C5 ; leg 2 circle it via each side: D4, C3, B4, C5 ;
       leg 3 return to start: A7
-5) Assemble each robot's route as a SHORT ordered list of the key waypoints from step 4 (start -> legs
+4) Assemble each robot's route as a SHORT ordered list of the key waypoints from step 3 (start -> legs
    -> final goal). Keep it sparse: consecutive waypoints may be far apart and the planner fills the gaps
-   collision-free.
-6) Verify and fix before writing the JSON: the route starts at the robot, follows the legs in order,
-   ends at the final goal, and truly satisfies the spatial constraint
-   (correct side of the landmark). Then put the route into the route object using the prescribed
-   output structure."""
+   collision-free. If both robots are sent to the same target, end their routes on two DIFFERENT
+   nearby points — two robots cannot occupy one cell.
+"""
 
 # controller -> ordered (field_name, description) for the reply's per-step reasoning fields, mirroring
 # the numbered steps of that controller's COT_BLOCKS entry above. route_schema declares them in this
@@ -291,26 +324,33 @@ waypoints that define the maneuver's shape.
 # short restatements, since the block itself carries the detailed guidance.
 COT_FIELDS = {
     "nav2point": [
-        ("step1_locate_targets", "Objects/locations named in the instruction, each with its grid label(s)."),
-        ("step2_choose_points",  "The alphanumeric points the robots should travel to."),
-        ("step3_check_blocked",  "For each desired point: whether it is blocked, the free point used "
-                                 "instead and the direction, and which robot is nearest."),
+        ("step1_ground",     "a) each robot's current grid point; b) the objects/goal locations named "
+                             "in the instruction with their label(s); c) each red marker and the "
+                             "object at or near it."),
+        ("step2_allocate",   "a) ONE robot (say which), BOTH, or UNSPECIFIED, and how the work "
+                             "divides; b) every point to visit, each with the robot closest to it."),
+        ("step3_route",      "The points assigned to each robot, in visit order."),
+        ("step4_verify",     "For each assigned point: whether it is blocked, and the free point used "
+                             "instead plus the direction."),
     ],
     "maneuver": [
         ("step1_locate",     "a) each robot's current grid point; b) task features (goals, boundaries "
                              "to avoid, landmarks) with the label(s) each occupies or spans."),
-        ("step2_subtasks",   "One subtask per robot, keeping every spatial constraint and landmark."),
-        ("step3_ground",     "Spatial words turned into concrete cells (far side, between, around)."),
-        ("step4_legs",       "Per robot: ordered legs with a short purpose and only the KEY waypoints."),
-        ("step5_assemble",   "Per robot: the short ordered route from start through the legs to the goal."),
-        ("step6_verify",     "Check the route starts at the robot, follows the legs, ends at the goal "
-                             "and satisfies the spatial constraint; fix it if not."),
+        ("step2_subtasks",   "One subtask per robot with every spatial constraint and landmark kept, "
+                             "which robot performs each, and the cell each ends at. A robot the "
+                             "instruction gives no work to gets the subtask \"stay\"."),
+        ("step3_legs",       "Per robot: ordered legs with a short purpose and only the KEY waypoints, "
+                             "each spatial constraint turned into cells on the required side."),
+        ("step4_assemble",   "Per robot: the short ordered route from start through the legs to the goal."),
     ],
     "coverage": [
-        ("step1_relevant_objects", "Objects/regions named and their locations, plus each robot's "
-                                   "initial position on the map."),
-        ("step2_select_regions",   "All regions the robots should cover or visit."),
-        ("step3_robot_assignment", "How those regions divide evenly between the robots."),
+        ("step1_ground",     "a) each robot's current grid point; b) the objects/regions named in the "
+                             "instruction with the label(s) each occupies or spans; c) each red marker "
+                             "and the object at or near it; d) a description of which regions must be "
+                             "covered, then every region matching it."),
+        ("step2_allocate",   "How those regions divide evenly between the robots."),
+        ("step3_verify",     "For each selected region: whether it is blocked, why it was chosen, and "
+                             "the nearby free region(s) replacing it."),
     ],
 }
 
@@ -403,15 +443,25 @@ def _controller_explain(controller: str, robot_names) -> str:
 def _cot_block(controller: str, robot_names, map_overlay_type: str) -> str:
     """Piece 5: the controller's chain-of-thought scaffold.
 
-    The maneuver scaffold carries a %RED_MARKER_STEP% sentinel filled only for the marked_obs
-    overlay — the only overlay that draws red X marks, so the model is never asked to inventory
-    marks that do not exist. The whole sentinel LINE is replaced (including its newline) so omitting
-    the sub-step leaves no blank line behind.
+    A scaffold may carry a %RED_MARKER_STEP% sentinel, filled only for the marked_obs overlay — the
+    only overlay that draws red X marks, so the model is never asked to inventory marks that do not
+    exist. Keyed on the sentinel being PRESENT rather than on a controller name, so adding it to
+    another block needs no change here.
+
+    The block owns the step LABEL ("   c) %RED_MARKER_STEP%") and _RED_MARKER_SUBSTEP is only the
+    body, so each block can number the sub-step to suit its own scheme. That means omission has to
+    drop the ENTIRE line, label included — substituting an empty body would leave a bare "c)" behind.
     """
     block = COT_BLOCKS[controller]
-    if controller == "maneuver":
-        red = _RED_MARKER_SUBSTEP if map_overlay_type == "marked_obs" else ""
-        block = block.replace("%RED_MARKER_STEP%\n", red)
+    if "%RED_MARKER_STEP%" in block:
+        keep = map_overlay_type == "marked_obs"
+        kept_lines = []
+        for line in block.splitlines(keepends=True):
+            if "%RED_MARKER_STEP%" not in line:
+                kept_lines.append(line)
+            elif keep:
+                kept_lines.append(line.replace("%RED_MARKER_STEP%", _RED_MARKER_SUBSTEP))
+        block = "".join(kept_lines)
     return _fill(block, robot_names)
 
 

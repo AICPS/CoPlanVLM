@@ -40,9 +40,8 @@ from ament_index_python.packages import get_package_share_directory
 
 import debug_io
 from coord_transform import ned_to_world
-from obs_seg import OCCUPIED
-from obs_seg.occupancy import render_inflation_overlay, world_to_cell, cell_to_world
-from .grid_planner_utils import project_to_free
+from obs_seg.occupancy import render_inflation_overlay
+from .grid_planner_utils import DEFAULT_MIN_GOAL_SEPARATION, separate_goal
 # Which overlay the VLM saw — needed so vlm_selections.png is drawn in the matching style.
 # /vlm_plan does not carry it, so both nodes read it from the shared prompt_gen constant.
 from node_Executive_API.prompt_gen import PRODUCTION_MAP_OVERLAY
@@ -89,7 +88,8 @@ class SimplePathTranslator(Node):
         # Minimum distance (metres) between two robots' FINAL goals. The VLM often sends both robots
         # to the same location; when a later-planned robot's goal falls within this radius of one
         # already claimed, its goal is displaced to the nearest free cell outside. 0 disables it.
-        self.declare_parameter("min_goal_separation", 0.5)
+        # Default from grid_planner_utils so the offline harness uses the same number.
+        self.declare_parameter("min_goal_separation", DEFAULT_MIN_GOAL_SEPARATION)
 
         # ─── Planner knobs (astar + coverage) ────────────────────────────────
         # The planner is chosen per message (from the /vlm_plan "planner" field), not by a param.
@@ -161,40 +161,13 @@ class SimplePathTranslator(Node):
 
     # ------------------------------------------------------------------
     def _separate_goal(self, goal_xy, claimed, infl, meta, max_shift):
-        """Nearest free cell to `goal_xy` that is >= min_goal_separation from every claimed goal.
+        """This node's `min_goal_separation` bound to grid_planner_utils.separate_goal.
 
-        Returns a world (x, y) — `goal_xy`'s own cell centre when it is already clear — or None if
-        no acceptable cell lies within `max_shift` metres, in which case the caller keeps the
-        original goal and warns.
-
-        A scratch COPY of the inflated grid gets a disc of radius min_goal_separation stamped
-        OCCUPIED around each claimed goal, then project_to_free's BFS ring search finds the nearest
-        cell that is neither an obstacle nor inside a claimed disc — one search handles both. `infl`
-        itself is never modified: the grid A* searches afterwards is untouched, so a robot may still
-        travel THROUGH another's claimed disc and a parked robot never blocks a corridor.
-
-        `max_shift` bounds the displacement. It is needed because adjusting the reference before
-        planning bypasses astar_proj's own projection_radius check (by then the cell is already free,
-        so its measured displacement is zero); without it a goal could slide far off target to
-        escape a disc.
+        The algorithm lives in the ROS-free library so scripts/test_pipeline.py runs exactly the
+        same separation; see that function for the scratch-grid and max_shift rationale.
         """
-        h, w = infl.shape
-        res = meta["resolution"]
-        scratch = infl.copy()
-        yy, xx = np.ogrid[0:h, 0:w]
-        r2 = (self.min_goal_separation / res) ** 2
-        for (cx_w, cy_w) in claimed:
-            cx, cy = world_to_cell(cx_w, cy_w, meta)
-            scratch[((xx - cx) ** 2 + (yy - cy) ** 2) <= r2] = OCCUPIED
-
-        goal_cell = world_to_cell(goal_xy[0], goal_xy[1], meta)
-        cell = project_to_free(scratch, goal_cell)
-        if cell is None:
-            return None
-        shift = math.hypot((cell[0] - goal_cell[0]) * res, (cell[1] - goal_cell[1]) * res)
-        if shift > max_shift:
-            return None
-        return cell_to_world(cell[0], cell[1], meta)
+        return separate_goal(goal_xy, claimed, infl, meta,
+                             min_separation=self.min_goal_separation, max_shift=max_shift)
 
     # ------------------------------------------------------------------
     def _snapshot_frame(self, snap) -> np.ndarray | None:

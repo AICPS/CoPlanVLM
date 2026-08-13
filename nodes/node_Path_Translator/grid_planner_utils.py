@@ -9,7 +9,8 @@ Cells are (gx, gy) = (column, row); grid is indexed grid[gy, gx].
 Lives inside node_Path_Translator, not at the top of nodes/, because its only consumers are
 this package's planners (astar_proj, coverage_proj); the top level is reserved for libraries
 genuinely shared across nodes (coord_transform, obs_seg, debug_io). Public API:
-``from .grid_planner_utils import astar, line_of_sight, project_to_free, simplify_path_los``.
+``from .grid_planner_utils import astar, line_of_sight, project_to_free, separate_goal,
+simplify_path_los``.
 """
 from __future__ import annotations
 
@@ -20,9 +21,15 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from obs_seg import FREE
+from obs_seg import FREE, OCCUPIED
+from obs_seg.occupancy import cell_to_world, world_to_cell
 
 Cell = Tuple[int, int]
+
+# m — minimum spacing between two robots' final goals. Defined here rather than at either call site
+# so node_Path_Translator (its ROS parameter default) and scripts/test_pipeline.py cannot drift
+# apart: a mismatch would make the offline debug figures describe a route the robots never execute.
+DEFAULT_MIN_GOAL_SEPARATION = 0.5
 
 # 8-connected neighborhood (dx, dy)
 _NEIGHBORS8 = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
@@ -31,6 +38,48 @@ _NEIGHBORS8 = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1,
 def _free(grid: np.ndarray, gx: int, gy: int) -> bool:
     h, w = grid.shape
     return 0 <= gx < w and 0 <= gy < h and grid[gy, gx] == FREE
+
+
+def separate_goal(goal_xy, claimed, infl: np.ndarray, meta: dict, *,
+                  min_separation: float, max_shift: float) -> Optional[Tuple[float, float]]:
+    """Nearest free cell to `goal_xy` that is >= `min_separation` from every claimed goal.
+
+    Returns a world (x, y) — `goal_xy`'s own cell centre when it is already clear — or None if no
+    acceptable cell lies within `max_shift` metres, in which case the caller keeps the original goal
+    and warns.
+
+    A scratch COPY of the inflated grid gets a disc of radius `min_separation` stamped OCCUPIED
+    around each claimed goal, then project_to_free's BFS ring search finds the nearest cell that is
+    neither an obstacle nor inside a claimed disc — one search handles both. `infl` itself is never
+    modified: the grid A* searches afterwards is untouched, so a robot may still travel THROUGH
+    another's claimed disc and a parked robot never blocks a corridor.
+
+    `max_shift` bounds the displacement. It is needed because adjusting the reference before
+    planning bypasses astar_proj's own projection_radius check (by then the cell is already free,
+    so its measured displacement is zero); without it a goal could slide far off target to escape
+    a disc.
+
+    Kept ROS-free here, rather than as a node method, so node_Path_Translator and the offline
+    harness (scripts/test_pipeline.py) run the SAME separation — otherwise the debug figures would
+    describe a route the robots never execute, which is exactly when the figure matters most.
+    """
+    h, w = infl.shape
+    res = meta["resolution"]
+    scratch = infl.copy()
+    yy, xx = np.ogrid[0:h, 0:w]
+    r2 = (min_separation / res) ** 2
+    for (cx_w, cy_w) in claimed:
+        cx, cy = world_to_cell(cx_w, cy_w, meta)
+        scratch[((xx - cx) ** 2 + (yy - cy) ** 2) <= r2] = OCCUPIED
+
+    goal_cell = world_to_cell(goal_xy[0], goal_xy[1], meta)
+    cell = project_to_free(scratch, goal_cell)
+    if cell is None:
+        return None
+    shift = math.hypot((cell[0] - goal_cell[0]) * res, (cell[1] - goal_cell[1]) * res)
+    if shift > max_shift:
+        return None
+    return cell_to_world(cell[0], cell[1], meta)
 
 
 def project_to_free(grid: np.ndarray, cell: Cell, max_radius_cells: int = 200) -> Optional[Cell]:
