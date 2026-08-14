@@ -428,7 +428,7 @@ def main() -> None:
         print(f"[{name}] {len(world_path)} waypoints: "
               f"start=({world_path[0][0]:.3f}, {world_path[0][1]:.3f})  "
               f"end=({world_path[-1][0]:.3f}, {world_path[-1][1]:.3f})  "
-              f"path length={length:.2f} m")
+              f"path length={length:.1f} m")
 
         out_dir = os.path.join(args.out, name)
         os.makedirs(out_dir, exist_ok=True)
@@ -455,9 +455,11 @@ def main() -> None:
     print(f"Tokens: {usage['total']} total "
           f"({usage['input']} input + {usage['output']} output)")
     if path_lengths:
-        for name, length in path_lengths.items():
-            print(f"Path length [{name}]: {length:.2f} m")
-        print(f"Path length [total]: {sum(path_lengths.values()):.2f} m")
+        # Sorted by name, NOT dict order: path_lengths is filled in `routes` key order, which is
+        # whatever order the VLM happened to emit, so the same two robots would swap places between
+        # runs and make two runs awkward to compare side by side.
+        for name in sorted(path_lengths):
+            print(f"Path length [{name}]: {path_lengths[name]:.1f} m")
     else:
         print("Path length: no paths were planned.")
     print("─" * 66)

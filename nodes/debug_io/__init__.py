@@ -228,12 +228,15 @@ def save_vlm_selections(out_dir: str, img_bgr: np.ndarray, map_overlay: str,
 
 
 def _draw_paths(vis: np.ndarray, world_paths: dict, camera: str):
-    """Draw each robot's dashed trajectory + hollow start marker, in place.
+    """Draw each robot's dashed trajectory + named hollow start marker, in place.
 
     Returns ``(colors, ends)``: the per-robot BGR color and final pixel point, both in
     `world_paths` insertion order. Shared by save_robot_paths and save_paths_with_waypoints so
     the two assign colors identically (map_gen._ROBOT_COLORS by insertion order) and stagger the
     dash phase the same way, keeping overlapping routes both-visible as alternating dashes.
+
+    Each start circle is labeled with its robot's name in that robot's own color, so a figure can be
+    read without cross-referencing the legend — which matters most when the two dashed routes cross.
     """
     dash = 18.0
     colors, ends = [], []
@@ -246,8 +249,35 @@ def _draw_paths(vis: np.ndarray, world_paths: dict, camera: str):
                        dtype=np.int32)
         _draw_dashed_polyline(vis, pts, bgr, thickness=6, dash=dash, phase=i * dash)
         cv2.circle(vis, tuple(pts[0]), _ROBOT_RADIUS, bgr, 4, lineType=cv2.LINE_AA)   # start: hollow
+        _draw_robot_name(vis, name, tuple(pts[0]), bgr)
         ends.append(tuple(pts[-1]))
     return colors, ends
+
+
+def _draw_robot_name(vis: np.ndarray, name: str, center, bgr) -> None:
+    """Write `name` beside a start circle at `center`, in that robot's color, in place.
+
+    Same gray-backed style as the waypoint labels so the two read as one annotation layer. Placed
+    to the upper-right of the marker, flipping to the left / below when that would run off the
+    frame — robots often start near an edge, where an unclamped label would be cut in half.
+    """
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thick, pad = 1.1, 3, 3
+    (tw, th), base = cv2.getTextSize(name, font, scale, thick)
+    h, w = vis.shape[:2]
+    cx, cy = int(center[0]), int(center[1])
+
+    tx = cx + _ROBOT_RADIUS + 6                       # default: right of the circle
+    if tx + tw + pad > w:
+        tx = cx - _ROBOT_RADIUS - 6 - tw              # too close to the right edge -> go left
+    ty = cy - _ROBOT_RADIUS - 6                       # default: above the circle
+    if ty - th - pad < 0:
+        ty = cy + _ROBOT_RADIUS + 6 + th              # too close to the top -> go below
+    tx = max(pad, min(tx, w - tw - pad))
+    ty = max(th + pad, min(ty, h - base - pad))
+
+    cv2.rectangle(vis, (tx - pad, ty - th - pad), (tx + tw + pad, ty + base), (225, 225, 225), -1)
+    cv2.putText(vis, name, (tx, ty), font, scale, bgr, thick, cv2.LINE_AA)
 
 
 def save_robot_paths(out_path: str, img_bgr: np.ndarray, world_paths: dict, camera: str, *,

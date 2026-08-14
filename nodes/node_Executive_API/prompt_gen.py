@@ -98,8 +98,8 @@ The image shows a labeled mark at every point of a regular grid with exactly 14 
 right) and 8 rows (1-8, top to bottom), giving points like "A1", "H4", "N8". Columns never go past N
 and rows never go past 8.
 Directions are cardinal and fixed to the image: WEST/LEFT is a lower column letter (A1 is west of
-B1), EAST/RIGHT a higher one (H2 is east of G2), NORTH/UP a lower row number (C3 is north of C5),
-and SOUTH/DOWN a higher one.
+B1), EAST/RIGHT a higher one (H2 is east of G2), NORTH/UP a lower row number (C3 is north of an object covering points C4, C5, D5),
+and SOUTH/DOWN a higher one (G5 is south of G4).
 Each mark has one of two forms:
 - a BLUE DOT marks a FREE point the robot CAN navigate to;
 - a RED X marks a point that is NOT passable — the robot CANNOT stand on or travel through a red X
@@ -151,9 +151,7 @@ Example — if the instruction is "Send %ROBOT_A% to the chair and then the pers
 _MANEUVER_EXPLAIN = """\
 YOUR TASK:
 Plan a specific route for each robot as an ordered list of waypoints, chosen from the labeled locations
-shown in the overlay. The route taken matters — follow the constraints in the instruction (loops,
-avoidance corridors, formations, etc.). Step between locations that have clear paths between them to draw
-a coherent path.
+shown in the overlay. The route taken matters so follow the instruction carefully. Step between locations that have clear paths between them to draw a coherent path.
 
 OUTPUT FORMAT (exactly one JSON object):
 {"waypoints": {"%ROBOT_A%": ["<point>", ...], "%ROBOT_B%": ["<point>", ...]}}
@@ -210,9 +208,12 @@ CoT REASONING STEPS — Before choosing routes, work through these in the "reaso
    get at least one point, and if both are sent to the same target give them two DIFFERENT nearby
    points — two robots cannot occupy one cell.
 4) VERIFICATION — for each assigned point, check whether its cell is blocked (see the blocked points
-   listed in the MAP OVERLAY): if it is blocked, give the direction that robot should be relative to the
-   obstacle, then the nearest FREE (blue-dot) point it can stand on in that direction; if the point is
-   already free, use it as-is (e.g. "%ROBOT_B% -> green box E8 is blocked -> travel to D6").
+   listed in the MAP OVERLAY). If it is blocked, you MUST give all four parts in order: name the
+   obstacle, state which SIDE of it the robot should be on (north/south/east/west), then the nearest
+   FREE (blue-dot) point on that side. Never go straight from "blocked" to a replacement point.
+      <robot> -> <label> is blocked by <obstacle> -> approach from the <direction> -> travel to <label>
+   If the point is already free, use it as-is: "<robot> -> <label> is free -> travel to <label>".
+   Example — "%ROBOT_B% -> E8 is blocked by the green box -> approach from the WEST -> travel to D8".
 """
 
 _COVERAGE_COT = """\
@@ -221,11 +222,16 @@ REASONING — Before deciding the routes, work through these in the "reasoning" 
    a) Give each robot's current position as the labeled grid point nearest it in the image
       (e.g. "%ROBOT_A%: A7", "%ROBOT_B%: D2").
    b) Identify every object/region named in the operator's instruction and give the grid label(s)
-      each one occupies or spans (e.g. "chair: C4", "yellow box: H8").
+      each one occupies or spans (e.g. "chair: C4", "yellow box: G8,G7,H8,H7").
    c) %RED_MARKER_STEP%
    d) Describe which regions the instruction requires the robots to cover or visit, then list every
-      grid region that matches that description.
+      grid region that matches that description. To survey completely AROUND an object, list the full
+      ring of free regions on every side of it, not just one side
+      (e.g. survey around yellow box G4,G5,H4,H5 -> G3,H3,I4,I5,H6,G6,F5,F4).
+      To cover an AREA or region, list every region INSIDE it, not the ring around it
+      (e.g. survey the area spanning A1-B3 -> A1,A2,A3,B1,B2,B3).
 2) TASK ALLOCATION — divide the regions from 1d evenly between %ROBOT_A% and %ROBOT_B%.
+   Try to assign points to the closest robot while maintaining a roughly even split.
 3) VERIFICATION — for each region selected in step 2, state whether it is in the blocked list given in
    the MAP OVERLAY. For each blocked one, state WHY it was chosen, then REPLACE it with the nearby
    free region (or regions) that best fulfills that same purpose. Every blocked region must be
@@ -240,8 +246,9 @@ REASONING — Before deciding the routes, work through these in the "reasoning" 
 # block is free to number it differently without touching this text. The continuation line keeps its
 # own indent, so it lines up under whatever label the caller supplies. _cot_block drops the ENTIRE
 # sentinel line when the sub-step is omitted, which is what stops a bare "c)" being left behind.
-_RED_MARKER_SUBSTEP = """Label each red marker: for every red X in the image, note its label and the object at or near it
-      (it may sit beside, not directly under, the mark); write "unknown" if unclear."""
+_RED_MARKER_SUBSTEP = """Label each red marker: for every red X in the image, give its grid label AND the
+      object under it or the closest object near it (it may sit beside, not directly under, the mark) —
+      one entry per marker, e.g. "H8: person", "C4: chair", "G3: box"; write "unknown" if unclear."""
 
 # ── Previous maneuver CoT (dense adjacent-cell path). Commented out, kept for reference. ──
 # _MANEUVER_COT = """\
@@ -292,10 +299,15 @@ waypoints that define the maneuver's shape.
       instruction), ends at B7 (beside %ROBOT_B%, which is at A7)
       subtask 2 stay: %ROBOT_B% (the instruction gives it no work), ends at A7 where it already is,
       so its route is empty
+   Example — "have %ROBOT_A% go around the west side of the pallet stack at E3-F5 to reach E6, while
+   %ROBOT_B% approaches the cart at L7 from the north":
+      subtask 1 go around the west side of the pallet stack at E3-F5 to reach E6: %ROBOT_A% (already
+      at B2, nearest), ends at E6 (the west side is column D, so the route must run down column D and
+      round the south end of the stack — NOT straight across open floor)
+      subtask 2 approach the cart at L7 from the north: %ROBOT_B% (already at M4, nearest), ends at L6
 3) For each robot, break its subtask into ordered legs, each with a clear and detailed description, giving only the KEY
    waypoint(s) that realize it. Turn each spatial constraint into concrete cells on the REQUIRED SIDE:
       (e.g. an object spanning F3-H3 -> pass north/above it via F2, G2, H2)
-      (e.g. an object at B5 -> approach from east/right via C5, B5)
    For a loop or circuit around an object, give
    waypoints on several DIFFERENT sides of it (not just the far side), so the route encircles the object
    instead of going out and doubling back the same way:
@@ -304,6 +316,11 @@ waypoints that define the maneuver's shape.
    Example — "%ROBOT_A%: loop around the chair at C4 and return to its start at A7":
       leg 1 approach the chair: C5 ; leg 2 circle it via each side: D4, C3, B4, C5 ;
       leg 3 return to start: A7
+   Example — "%ROBOT_A%: travel around the left side of the chair at D3,D4 before continuing to the
+   person at F7". One leg per clause, and the side constraint becomes cells on that side:
+      leg 1 pass the chair on its LEFT/WEST side: C3, C4 (left of column D is column C, so the route
+      runs down column C — the leg must sit beside the chair, not on open floor away from it) ;
+      leg 2 continue to the person: F6 (just north of the person at F7)
 4) Assemble each robot's route as a SHORT ordered list of the key waypoints from step 3 (start -> legs
    -> final goal). Keep it sparse: consecutive waypoints may be far apart and the planner fills the gaps
    collision-free. If both robots are sent to the same target, end their routes on two DIFFERENT

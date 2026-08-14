@@ -55,7 +55,7 @@ ROBOT_CLEAR_RADIUS   = 0.65
 # EDGE_WALL_MARGIN-metre ring is forced OCCUPIED AFTER inflation, so the frame border is a crisp
 # fixed-width wall with no inward inflation halo. This is a physical standoff distance, so it stays in
 # METRES (unlike the pixel-based clear); kept separate so the two tune independently.
-EDGE_WALL_MARGIN     = 0.3
+EDGE_WALL_MARGIN     = 0.25
 
 # internal priority codes for conservative aggregation (higher wins)
 _C_NONE, _C_FREE, _C_UNKNOWN, _C_OBSTACLE = -1, 0, 1, 2

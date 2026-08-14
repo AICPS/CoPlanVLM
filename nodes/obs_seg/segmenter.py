@@ -39,7 +39,7 @@ SEG_TRAVERSABLE   = ["the floor"]
 # non-floor pixel falls below threshold -> UNKNOWN -> treated as blocked downstream. Add obstacle
 # prompts here (e.g. "a person") to switch to the two-sided argmax classify() supports.
 SEG_UNTRAVERSABLE = []
-SEG_THRESHOLD     = 0.5 # was 0.48
+SEG_THRESHOLD     = 0.50 # was 0.48, .5
 
 # internal per-prompt class tags
 _TRAVERSABLE, _UNTRAVERSABLE = 0, 1
