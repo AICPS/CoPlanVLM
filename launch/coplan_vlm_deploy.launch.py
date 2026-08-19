@@ -8,13 +8,22 @@ from dotenv import load_dotenv
 from ament_index_python.packages import get_package_share_directory
 
 
-# Real-world deployment variant of coplan_vlm-4sim.launch.py.
+# Real-world deployment variant of coplan_vlm_4sim.launch.py.
 #
-# Identical to the sim launch EXCEPT it omits the two node_Odometry_To_Pose converters.
-# Those only existed to turn the sim's /<robot>/sim_ground_truth_pose (nav_msgs/Odometry)
-# into the /<robot>/ned/pose_stamped (PoseStamped) that control/translator/visualizer
-# consume. In the real world the MoCap system already publishes /<robot>/ned/pose_stamped
-# directly, so no conversion is needed. Everything downstream is unchanged.
+# The planning and control stack is the same in both: same nodes, same robot roster, same
+# remappings, same launch arguments. What differs is everything that describes the ENVIRONMENT
+# those nodes run in:
+#
+#   * No node_Odometry_To_Pose converters. Those exist only to turn the sim's
+#     /<robot>/sim_ground_truth_pose (nav_msgs/Odometry) into the /<robot>/ned/pose_stamped
+#     (PoseStamped) that control/translator/visualizer consume. MoCap publishes that topic
+#     directly, so nothing has to convert it.
+#   * camera: 'lab_test' instead of 'gazebo' on exec, translator and visualizer — the real
+#     intrinsics and mounting height, so every pixel<->world conversion changes.
+#   * The overhead camera topics: /ueye/test/image_raw and /ueye/test/camera_info. camera_info
+#     must be set explicitly here because both nodes DEFAULT to the sim topic; leaving it would
+#     silently skip undistortion (see the visualizer's note below for what that costs).
+#   * debug_dir -> debug/deploy_real, so a lab run never overwrites a sim run.
 def generate_launch_description():
     pkg_dir = str(get_package_share_directory('coplan_vlm'))
     grid_csv_path = pkg_dir + '/config/grid_cell_centers.csv'

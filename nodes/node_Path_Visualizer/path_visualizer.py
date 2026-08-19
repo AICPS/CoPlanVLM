@@ -25,10 +25,24 @@ from cv_bridge import CvBridge
 from coord_transform import (world_to_pixel, world_to_pixel_pose, ned_to_world,
                              ned_to_world_pose, yaw_from_quaternion)
 
-ROBOT_LABEL_SCALE = 0.8
-ROBOT_LABEL_THICKNESS = 2
+# All overlay text (robot names, the "S"/"E" route-endpoint letters) is drawn at ONE size: this many
+# pixels of capital-letter height AS DISPLAYED. The cv2 font scale needed for it is derived in
+# _scale_for_text_height rather than hardcoded, and divided by display_scale, so the text measures
+# TEXT_HEIGHT_PX in the window whatever the window is scaled to — the trap the dash pattern below
+# still has to warn about does not apply here.
+TEXT_HEIGHT_PX = 12
+TEXT_THICKNESS = 2
 PLANNED_PATH_THICKNESS = 4
 TRAJECTORY_THICKNESS = 4
+# Dash pattern for the PLANNED path, in pixels of arc length AT FULL RESOLUTION. Note these are
+# halved on screen: the frame is drawn full-size and then scaled by display_scale (0.5 by default)
+# just before imshow, so a pattern that looks right while drawing reads as nearly solid in the
+# window. These are chosen for how they appear AFTER that downscale — an 8 px dash every 18 px, or
+# ~6 dashes per metre of path at the lab camera's ~225 px/m. Keep the dash below half the period so
+# the line still reads as broken rather than solid; change the SUM to respace, the RATIO to
+# lengthen the dashes.
+DASH_LENGTH = 16.0
+DASH_GAP = 20.0
 
 
 class PathVisualizer(Node):
@@ -59,6 +73,12 @@ class PathVisualizer(Node):
 
         self.start_color = tuple(int(c) for c in self.get_parameter("start_color").value)
         self.end_color = tuple(int(c) for c in self.get_parameter("end_color").value)
+        self.trail_min_step = float(self.get_parameter("trail_min_step").value)
+
+        # Text is drawn on the full-size frame but seen after the display_scale downscale, so ask for
+        # a proportionally taller glyph to land at TEXT_HEIGHT_PX on screen.
+        shrink = self.display_scale if 0.0 < self.display_scale < 1.0 else 1.0
+        self.text_scale = self._scale_for_text_height(TEXT_HEIGHT_PX / shrink, TEXT_THICKNESS)
 
         # Pixel<->world calibration lives entirely in coord_transform (see _world_to_pixel).
         self.grid_pixels = self._load_grid_csv(self.grid_csv)
@@ -77,9 +97,16 @@ class PathVisualizer(Node):
         self.latest_path_labels: Dict[str, List[str]] = {n: [] for n in self.robot_names}
         self.latest_world_path: Dict[str, List[Tuple[float, float]]] = {n: [] for n in self.robot_names}
         self.latest_pose: Dict[str, Optional[PoseStamped]] = {n: None for n in self.robot_names}
-        # Per-robot trajectory trail: recent measured poses (gazebo x, y), capped.
+        # Per-robot trajectory trail: every measured pose (gazebo x, y) since the CURRENT plan
+        # arrived. Two rules together give "the whole of this mission, and only this mission":
+        #   * no length cap, so the trail never evaporates partway through a run (the old
+        #     maxlen=3000 was ~5 min at a 10 Hz pose rate but only ~30 s at the 100 Hz a MoCap
+        #     stream can deliver — it vanished fastest exactly where it mattered most); and
+        #   * cleared per robot in _make_world_path_cb when a new waypoint path is published.
+        # What keeps the uncapped buffer affordable is trail_min_step in _make_pose_cb: points are
+        # stored by DISTANCE travelled, not by time, so a stationary robot adds nothing.
         self.pose_history: Dict[str, Deque[Tuple[float, float]]] = {
-            n: deque(maxlen=3000) for n in self.robot_names
+            n: deque() for n in self.robot_names
         }
         self.camera_matrix: Optional[np.ndarray] = None
         self.dist_coeffs: Optional[np.ndarray] = None
@@ -130,6 +157,25 @@ class PathVisualizer(Node):
         self.declare_parameter("start_color", [0, 255, 0])
         self.declare_parameter("end_color", [0, 0, 255])
 
+        # Minimum distance (metres) the robot must move before another trail point is stored. The
+        # trail is kept for the whole run, so this — not a length cap — is what bounds it: at 0.02 m
+        # a kilometre of driving is ~50k points, while a parked robot adds none no matter how fast
+        # its poses arrive. It is also finer than the 0.05 m occupancy cell, so the drawn trail stays
+        # faithful to the route. Set 0.0 to store every pose received.
+        self.declare_parameter("trail_min_step", 0.02)
+
+    @staticmethod
+    def _scale_for_text_height(target_px: float, thickness: int) -> float:
+        """cv2 font scale whose CAPITAL-letter height is target_px.
+
+        Measured rather than assumed: cv2 reports the rendered height for a given scale, and height
+        is linear in scale, so one measurement at 1.0 gives the ratio exactly. Capitals are the
+        reference because they are the tallest glyphs, so the "S"/"E" markers and a lowercase robot
+        name come out visually the same size instead of the name looking smaller.
+        """
+        (_, height_at_1), _ = cv2.getTextSize("S", cv2.FONT_HERSHEY_SIMPLEX, 1.0, thickness)
+        return target_px / max(height_at_1, 1)
+
     def _load_grid_csv(self, csv_path: str) -> Dict[str, Tuple[float, float]]:
         pixels: Dict[str, Tuple[float, float]] = {}
         path = Path(csv_path)
@@ -176,6 +222,19 @@ class PathVisualizer(Node):
             for i in range(0, len(msg.data) - 1, 2):
                 coords.append((float(msg.data[i]), float(msg.data[i + 1])))
             self.latest_world_path[name] = coords
+
+            # A new plan starts a new trail: the solid line should show how this robot executed THIS
+            # path, not an accumulation of every path it has driven since the node started. Safe to
+            # do on every message because the translator publishes /<robot>/waypoint_path once per
+            # plan, not on a timer — so this fires per mission, not per tick. Only this robot's
+            # trail is cleared; the other keeps its own.
+            self.pose_history[name].clear()
+            # Seed from the latest known pose so the trail begins exactly where the robot was when
+            # the plan arrived, rather than starting blank until it has moved trail_min_step.
+            pose_msg = self.latest_pose[name]
+            if pose_msg is not None:
+                self.pose_history[name].append(
+                    (pose_msg.pose.position.x, pose_msg.pose.position.y))
         return _cb
 
     def _camera_image_callback(self, msg: Image) -> None:
@@ -200,7 +259,17 @@ class PathVisualizer(Node):
     def _make_pose_cb(self, name: str):
         def _cb(msg: PoseStamped) -> None:
             self.latest_pose[name] = msg
-            self.pose_history[name].append((msg.pose.position.x, msg.pose.position.y))
+            # Store by distance travelled, not by message: the trail is never trimmed, so admitting
+            # every pose would let a parked robot grow it without bound and pile thousands of
+            # coincident points onto one pixel. Sub-threshold motion is still tracked live through
+            # latest_pose — only the historical trail is thinned.
+            xy = (msg.pose.position.x, msg.pose.position.y)
+            hist = self.pose_history[name]
+            if hist and self.trail_min_step > 0.0:
+                px, py = hist[-1]
+                if math.hypot(xy[0] - px, xy[1] - py) < self.trail_min_step:
+                    return
+            hist.append(xy)
         return _cb
 
     def _grid_path_pixels(self, labels: List[str]) -> List[Tuple[int, int]]:
@@ -251,33 +320,45 @@ class PathVisualizer(Node):
         return int(round(u)), int(round(v))
 
 
-    def _draw_grid_endpoints(
+    def _draw_path_endpoints(
         self,
         image: np.ndarray,
         path_pixels: List[Tuple[int, int]],
         label_prefix: str = "",
     ) -> None:
-        """Draw only one VLM route's start/end markers; do not connect its centroids."""
+        """Mark one robot's route start (green "S") and end (red "E").
+
+        `path_pixels` is the robot's planned waypoint path in pixels — the translated, obstacle-aware
+        output the controller receives — so S and E are where the robot actually departs from and
+        stops. A single-waypoint route gets only the S marker.
+        """
         prefix = f"{label_prefix} " if label_prefix else ""
         if len(path_pixels) >= 1:
             cv2.circle(image, path_pixels[0], self.circle_radius, self.start_color, 3)
             cv2.putText(
                 image, f"{prefix}S",
                 (path_pixels[0][0] + 10, path_pixels[0][1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.start_color, 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, self.text_scale, self.start_color,
+                TEXT_THICKNESS, cv2.LINE_AA,
             )
         if len(path_pixels) >= 2:
             cv2.circle(image, path_pixels[-1], self.circle_radius, self.end_color, 3)
             cv2.putText(
                 image, f"{prefix}E",
                 (path_pixels[-1][0] + 10, path_pixels[-1][1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.end_color, 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, self.text_scale, self.end_color,
+                TEXT_THICKNESS, cv2.LINE_AA,
             )
 
     @staticmethod
     def _draw_dashed_polyline(img, pts, color, thickness=2, dash=14.0, gap=10.0):
-        """Draw a dashed polyline through pts so the actual trail reads distinct from the
-        SOLID planned path (dashes measured along arc length, robust to dense trail points)."""
+        """Draw a broken polyline through pts so the planned path reads distinct from the SOLID
+        measured trail.
+
+        `dash`/`gap` are arc-length pixels and the pattern is continuous across vertices, so it looks
+        the same whether the points are metres apart (the planned path) or millimetres apart. Pass
+        DASH_LENGTH/DASH_GAP for the planned-path pattern; the defaults are a different rhythm.
+        """
         period = dash + gap
         acc = 0.0  # arc length consumed so far, for continuous dashing across segments
         for a, b in zip(pts, pts[1:]):
@@ -306,27 +387,30 @@ class PathVisualizer(Node):
             # Perpendicular offset so robots' planned paths stay visible where they coincide.
             offset = self._robot_offset(idx)
 
-            # Waypoint path from /<name>/waypoint_path (metres -> pixels), in the robot's color.
+            # Waypoint path from /<name>/waypoint_path (metres -> pixels), in the robot's color,
+            # drawn DOTTED: it is the intent, which the robot may not have driven yet (or at all).
+            # The solid trail below is the record of what actually happened.
             world_pixels = [self._world_to_pixel(x, y) for x, y in self.latest_world_path[name]]
             world_pixels = self._offset_polyline(world_pixels, offset)
-            for i in range(len(world_pixels) - 1):
-                cv2.line(
-                    frame, world_pixels[i], world_pixels[i + 1],
-                    color, PLANNED_PATH_THICKNESS, cv2.LINE_AA)
+            self._draw_dashed_polyline(
+                frame, world_pixels, color, thickness=PLANNED_PATH_THICKNESS,
+                dash=DASH_LENGTH, gap=DASH_GAP)
 
-            # Retain only the VLM route's start/end markers. The centroid-to-centroid route is not
-            # a collision-aware path; the solid path above is the translated planner output.
-            path_pixels = self._grid_path_pixels(self.latest_path_labels[name])
-            path_pixels = self._offset_polyline(path_pixels, offset)
-            self._draw_grid_endpoints(frame, path_pixels, name)
+            # S/E markers on the EXECUTED route: the first and last waypoint the controller was
+            # actually given, not the first/last cell the VLM picked. Those differ whenever the
+            # planner projects a pick onto a free cell, drops one it cannot reach, or separates two
+            # robots' goals — so marking the VLM's centroids would label a start and end the robot
+            # never drives to. Reuses world_pixels, already offset above, so the markers sit exactly
+            # on the drawn line.
+            self._draw_path_endpoints(frame, world_pixels, name)
 
-            # Actual measured trajectory trail (history of poses), drawn DASHED in the robot's
-            # color so it reads distinct from the SOLID planned path. Poses are in NED, so
-            # convert NED -> world -> pixel to overlay the planned path.
+            # Actual measured trajectory trail (history of poses), drawn SOLID in the robot's color
+            # so the ground truth reads as the continuous line and the dotted plan above as intent.
+            # Poses are in NED, so convert NED -> world -> pixel to overlay the planned path.
             traj = [self._world_to_pixel(*ned_to_world(hx, hy))
                     for hx, hy in self.pose_history[name]]
-            self._draw_dashed_polyline(
-                frame, traj, color, thickness=TRAJECTORY_THICKNESS)
+            for i in range(len(traj) - 1):
+                cv2.line(frame, traj[i], traj[i + 1], color, TRAJECTORY_THICKNESS, cv2.LINE_AA)
 
             # Robot pose from /<name>/ned/pose_stamped (NED).
             pose_msg = self.latest_pose[name]
@@ -351,7 +435,7 @@ class PathVisualizer(Node):
 
                 (text_w, text_h), baseline = cv2.getTextSize(
                     name, cv2.FONT_HERSHEY_SIMPLEX,
-                    ROBOT_LABEL_SCALE, ROBOT_LABEL_THICKNESS)
+                    self.text_scale, TEXT_THICKNESS)
                 label_x = robot_u + 16
                 if label_x + text_w >= frame.shape[1]:
                     label_x = robot_u - 16 - text_w
@@ -363,7 +447,7 @@ class PathVisualizer(Node):
                 cv2.putText(
                     frame, name, (label_x, label_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    ROBOT_LABEL_SCALE, color, ROBOT_LABEL_THICKNESS, cv2.LINE_AA,
+                    self.text_scale, color, TEXT_THICKNESS, cv2.LINE_AA,
                 )
 
         if 0.0 < self.display_scale < 1.0:

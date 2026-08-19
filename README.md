@@ -133,7 +133,7 @@ instances that handle both robots via their `robot_names` parameter.
 
 ---
 
-## Safety Filter (CBF‑QP)
+<!-- ## Safety Filter (CBF‑QP)
 
 The VLM plan is obstacle‑aware only at planning time. Anything that happens afterwards — the other
 robot crossing the path, tracking error, a stale plan — is unmodelled. `node_Control` therefore runs
@@ -198,9 +198,9 @@ falls back to the unfiltered nominal command.
 **Cost.** The QP is only solved on ticks where the nominal command actually violates a row — when it
 is already feasible it *is* the optimum, so it is returned unchanged without invoking the solver.
 Measured against a real occupancy snapshot (20 496 blocked cells): the filter runs in **0.6 ms mean,
-2.1 ms worst** against the 100 ms control period, with 0 solver fallbacks in 1500 poses.
+2.1 ms worst** against the 100 ms control period, with 0 solver fallbacks in 1500 poses. -->
 
-### Parameters
+<!-- ### Parameters
 
 All on `node_Control`; the launch files set `robot_name` / `robot_names` per instance.
 
@@ -243,7 +243,7 @@ set by normalising each deviation against the actuation available to it.
 * Safety further depends on pose, map, model and timing accuracy; discrete 10 Hz updates and
   actuator tracking error are what the conservative margins above pay for.
 
----
+--- -->
 
 ## Prerequisites
 

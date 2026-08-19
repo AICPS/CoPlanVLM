@@ -245,6 +245,23 @@ def _path_length(world_path: list) -> float:
                for a, b in zip(world_path, world_path[1:]))
 
 
+def _print_path_lengths(path_lengths: dict) -> None:
+    """Print each robot's path length: donnie, then raph, then anyone else. One decimal, no total.
+
+    A FIXED order, not dict order: path_lengths is filled in `routes` key order — whatever order the
+    VLM happened to emit — so the same two robots would swap places between runs and make two runs
+    awkward to compare side by side. Every harness (test_pipeline, _real, _battleship_baseline,
+    _regression_only) calls this one function so their evaluation blocks stay directly comparable.
+    """
+    if not path_lengths:
+        print("Path length: no paths were planned.")
+        return
+    order = [n for n in ("donnie", "raph") if n in path_lengths]
+    order += [n for n in path_lengths if n not in order]   # any others, insertion order
+    for name in order:
+        print(f"Path length [{name}]: {path_lengths[name]:.1f} m")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -454,14 +471,7 @@ def main() -> None:
           + ("  (classifier-chosen)" if args.planner is None else "  (manual)"))
     print(f"Tokens: {usage['total']} total "
           f"({usage['input']} input + {usage['output']} output)")
-    if path_lengths:
-        # Sorted by name, NOT dict order: path_lengths is filled in `routes` key order, which is
-        # whatever order the VLM happened to emit, so the same two robots would swap places between
-        # runs and make two runs awkward to compare side by side.
-        for name in sorted(path_lengths):
-            print(f"Path length [{name}]: {path_lengths[name]:.1f} m")
-    else:
-        print("Path length: no paths were planned.")
+    _print_path_lengths(path_lengths)
     print("─" * 66)
 
     print("Done.")

@@ -290,14 +290,7 @@ def main() -> None:
           + ("  (classifier-chosen)" if args.planner is None else "  (manual)"))
     print(f"Tokens: {usage['total']} total "
           f"({usage['input']} input + {usage['output']} output)")
-    if path_lengths:
-        # Sorted by name, NOT dict order: path_lengths is filled in `routes` key order, which is
-        # whatever order the VLM happened to emit, so the same two robots would swap places between
-        # runs and make two runs awkward to compare side by side.
-        for name in sorted(path_lengths):
-            print(f"Path length [{name}]: {path_lengths[name]:.1f} m")
-    else:
-        print("Path length: no paths were planned.")
+    tp._print_path_lengths(path_lengths)
     print("─" * 66)
 
     print("Done.")
