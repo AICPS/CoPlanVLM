@@ -243,20 +243,25 @@ def create_filtered_occupancy_map(grid: np.ndarray, meta: dict, world_poses=None
     the raw map.
 
     The outer EDGE_WALL_MARGIN-metre ring is forced OCCUPIED AFTER inflation, giving a crisp fixed-width
-    border with no inward inflation halo (the edge UNKNOWN was cleared to FREE before inflation). The wall
-    is also stamped into `cleared` — which is never re-inflated — so it renders as a true obstacle (red)
-    in the debug overlays, not as inflation margin (yellow).
+    border with no inward inflation halo (the edge UNKNOWN was cleared to FREE before inflation). It is
+    stamped into `inflated` ONLY, deliberately not into `cleared`: the wall is a synthetic standoff this
+    code invents, not something the segmenter detected, so it belongs in the debug overlays' margin
+    layer (yellow) alongside the inflation halo rather than in the detected-obstacle layer (red).
+    Because it is absent from `cleared` but present in `inflated`, render_inflation_overlay classifies
+    it as margin with no special-casing. Where the segmenter DID find a real obstacle overlapping the
+    border, that cell stays OCCUPIED in `cleared` (_apply_free_overrides never clears a true OCCUPIED)
+    and correctly renders red.
 
     Returns the inflated planning grid. If `return_cleared` is True, returns
-    ``(inflated, cleared)`` where `cleared` is the post-override, pre-inflation grid (plus the perimeter
-    wall) used as the red layer in debug visualizations.
+    ``(inflated, cleared)`` where `cleared` is the post-override, pre-inflation grid used as the red
+    layer in debug visualizations. `cleared` is a RENDERING input only — never plan against it; the
+    planning grid, perimeter wall included, is `inflated`.
     """
     cleared = _apply_free_overrides(grid, meta, world_poses)
     inflated = inflate_occupancy(cleared, meta["resolution"])
-    # Hard perimeter wall, stamped post-inflation so it stays a crisp EDGE_WALL_MARGIN-metre border. Also
-    # applied to `cleared` (not re-inflated) so the overlays show it red rather than yellow.
+    # Hard perimeter wall, stamped post-inflation so it stays a crisp EDGE_WALL_MARGIN-metre border.
+    # Planning grid only — see the docstring for why `cleared` deliberately does not get it.
     _stamp_edge_wall(inflated, meta)
-    _stamp_edge_wall(cleared, meta)
     return (inflated, cleared) if return_cleared else inflated
 
 
@@ -269,7 +274,9 @@ def render_inflation_overlay(base_bgr: np.ndarray, occ: np.ndarray, infl: np.nda
         red    — cells blocked in `occ`. Pass the post-override, pre-inflation grid (the `cleared`
                  grid from create_filtered_occupancy_map) so this layer shows the true obstacles fed
                  to inflation and NOT regions that were cleared to free before inflating.
-        yellow — inflation-only margin: OCCUPIED in `infl` but not blocked in `occ`.
+        yellow — margin: OCCUPIED in `infl` but not blocked in `occ`. That is the inflation halo AND
+                 the EDGE_WALL_MARGIN perimeter wall, both of which are buffers this code adds rather
+                 than things the segmenter saw (see create_filtered_occupancy_map).
 
     `base_bgr` is an (H, W, 3) BGR image; the returned image is a copy (the input is not modified).
     Every image pixel is mapped to its grid cell via the shared pixel->world transform, so the overlay

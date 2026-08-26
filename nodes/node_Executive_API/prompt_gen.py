@@ -11,9 +11,27 @@ Each operator instruction goes through two LLM calls:
 generate_prompt composes the planner prompt from independent, swappable pieces, always in a fixed order:
   1. COMMON_PREAMBLE                       — robot descriptions, image context, global rules (shared)
   2. MAP_OVERLAY_DESCRIPTION[overlay]      — how THIS overlay marks the map
-  (image)                                  — the matching overlay image, rendered + returned as base64
-  4. CONTROLLER_EXPLAIN[controller]        — what to select, output schema, example + the operator line
-  5. COT_BLOCKS[controller]                — optional per-controller chain-of-thought scaffold
+  3. CONTROLLER_EXPLAIN[controller]        — what to select, the output schema, and a worked example
+  4. _operator_line(instruction)           — the operator's actual instruction
+  5. COT_BLOCKS[controller]                — optional per-controller chain-of-thought scaffold (cot=True)
+
+Those five are joined with blank lines into ONE string. The overlay image is NOT spliced in among
+them: generate_prompt returns ``(prompt_text, image_b64)`` as two separate values and has no say in
+where the image goes — the caller places it. Every caller sends the joined text as the SYSTEM prompt
+(``instructions=``) and the image as the user turn, so what the model actually receives is:
+
+    system: piece 1 -> 2 -> 3 -> 4 -> 5
+    user:   the overlay image
+
+i.e. the image arrives AFTER all of the text, not between pieces 2 and 3. Note also that with
+cot=True the operator's instruction (piece 4) precedes the chain-of-thought scaffold rather than
+coming last.
+
+exec.py sends the image as the user turn's only content. The standalone baseline harnesses
+(test_regression_only / test_convoi_prompting / test_battleship_baseline) instead send
+``[input_text(operator instruction), input_image]``, so there the instruction appears twice — once in
+the system prompt and once as user text. Those scripts do not use this module's prompts, but the
+difference is worth knowing when comparing conditions.
 
 A single ``map_overlay_type`` selects BOTH the description text (piece 2) and the map_gen renderer that
 draws the image, so the prompt and the image stay in lock-step.
@@ -498,7 +516,7 @@ def generate_prompt(instruction, controller, map_overlay_type, *,
     """Assemble the planner system prompt AND render the matching overlay image.
 
     Returns ``(prompt_text, image_b64)``. ``controller`` selects the task semantics + output schema
-    (piece 4); ``map_overlay_type`` selects BOTH the overlay description (piece 2) and the map_gen
+    (piece 3); ``map_overlay_type`` selects BOTH the overlay description (piece 2) and the map_gen
     renderer that draws the image, so text and image always agree. ``cot=True`` appends the
     controller's chain-of-thought scaffold (piece 5); for maneuver the red-marker sub-step is included
     only when ``map_overlay_type == "marked_obs"``.
