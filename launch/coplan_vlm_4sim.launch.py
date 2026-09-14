@@ -30,6 +30,10 @@ def generate_launch_description():
     # Define Robot's Name
     bot_name = 'raph'
     bot2_name = 'donnie'   # second robot (blue hat); stubbed control on /donnie/* topics
+    # Every robot_names roster below lists donnie FIRST, to match the key order of
+    # test_data/poses.json used by scripts/test_pipeline.py. The order sets which robot is
+    # %ROBOT_A% in the VLM prompt and which marker colour each robot gets (index 0 = magenta), so
+    # keeping it identical makes live prompts byte-comparable with the offline harness.
 
     # Executive API node, OpenAI pathing
     exec_api_node = GroupAction([
@@ -41,7 +45,7 @@ def generate_launch_description():
             emulate_tty=True,
             parameters=[
                 {'openai_api_key': api_key},
-                {'robot_names': [bot_name, bot2_name]},
+                {'robot_names': [bot2_name, bot_name]},
                 {'replan_mode': LaunchConfiguration('replan_mode')},
                 {'replan_period': ParameterValue(
                     LaunchConfiguration('replan_period'), value_type=float)},
@@ -72,7 +76,7 @@ def generate_launch_description():
                 # the other three nodes take. The CBF safety filter derives its peers as
                 # roster-minus-self, so a mismatch here disarms peer avoidance (and is logged).
                 {'robot_name': bot_name},
-                {'robot_names': [bot_name, bot2_name]},
+                {'robot_names': [bot2_name, bot_name]},
                 {'enable_safety_filter': LaunchConfiguration('safety_filter')},
             ],
             remappings=[
@@ -110,7 +114,7 @@ def generate_launch_description():
             emulate_tty=True,
             parameters=[
                 {'robot_name': bot2_name},
-                {'robot_names': [bot_name, bot2_name]},
+                {'robot_names': [bot2_name, bot_name]},
                 {'enable_safety_filter': LaunchConfiguration('safety_filter')},
             ],
             remappings=[
@@ -146,7 +150,7 @@ def generate_launch_description():
             {'grid_csv': grid_csv_path},
             {'debug_dir': debug_dir},
             {'save_debug': True},
-            {'robot_names': [bot_name, bot2_name]},
+            {'robot_names': [bot2_name, bot_name]},
             {'camera': 'gazebo'},   # overhead camera calibration for pixel<->world
         ]
     )
@@ -169,7 +173,7 @@ def generate_launch_description():
         parameters=[
             {'grid_csv': grid_csv_path},
             {'circle_radius': 16},
-            {'robot_names': [bot_name, bot2_name]},
+            {'robot_names': [bot2_name, bot_name]},
             {'camera': 'gazebo'},   # overhead camera calibration for world<->pixel
         ],
         remappings=[
