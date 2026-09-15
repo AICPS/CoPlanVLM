@@ -16,7 +16,8 @@
 10. [Running in Simulation](#running-in-simulation)
 11. [Running in the Lab](#running-in-the-lab)
 12. [Testing & Debugging](#testing--debugging)
-13. [License](#license)
+13. [Test Prompts and Success Criteria](#Test-Prompts-And-Success-Criteria)
+14. [License](#license)
 
 ---
 
@@ -446,6 +447,29 @@ python3 src/CoPlanVLM/scripts/test_pipeline.py \
 before spending a request.
 
 ---
+
+## Test Prompts and Success Criteria
+
+| Prompt | Classification | Environment | Prompt | Success Criteria |
+|--------|---------------|-------------|--------|-----------------|
+| 1 | nav2point | Sim | "Surround the person in the purple shirt by sending robots to the left and right sides of the person" | Both robots end within one grid point of the person in purple, with one robot on the left of the person and one robot on the right of the person. |
+| 2 | nav2point | Sim | "Have each robot hide on left side of the nearest obstacle" | Robots are positioned directly left of the nearest obstacle, within 1 grid point of the obstacle. |
+| 3 | nav2point | Sim | "Visit each of the four colored boxes" | For each box, a robot passes within one grid point of the box. |
+| 4 | nav2point | AVL 1 | "Send both robots to the white X marked in tape" | Both robots end within 1 grid point of the white tape X. |
+| 5 | nav2point | AVL 2 | "Move one robot to the north of the boxes and one to the south of the boxes." | One robot ends within 1 grid point of the north side of the rack of boxes; the other ends within 1 grid point of the south side. |
+| 6 | nav2point | AVL 3 | "Visit each object in the scene." | At least one robot passes within 1 grid point of each of the 3 objects (2 boxes, 1 chair). |
+| 7 | Coverage | Sim | "Patrol the perimeter of the map" | Every point of the edge of the map that is not blocked by an obstacle is visited by at least one robot. Success is 95% of points visited, meaning 2 points total can be missed. |
+| 8 | Coverage | Sim | "Patrol around the rack of boxes" | At least one robot passes within one grid point of each grid point on the perimeter of the rack. |
+| 9 | Coverage | Sim | "Survey the area inside the black and yellow striped tape." | All open points within the square marked by the tape are visited by a robot. (At least 95% coverage means no points can be missed.) |
+| 10 | Coverage | AVL 1 | "Have the robots patrol the area around the chair." | At least one robot passes within 1 grid point of all 4 sides (North, South, East, West) of the chair. Success = all 4 sides visited. |
+| 11 | Coverage | AVL 2 | "Have the robots survey the large square marked in tape on the left side." | At least one robot visits every free grid point inside the taped square. Success = 95% of free points visited (max 1 point missed). |
+| 12 | Coverage | AVL 3 | "Patrol the left half of the map." | At least one robot visits every free grid point in the left half of the map. Success = ≥95% of free points visited (max 1 point missed). |
+| 13 | maneuver | Sim | "Have donnie do a loop around the red and blue boxes and then meet up with raph" | Donnie completes a full loop around the red and blue boxes, then ends within 1 grid point of Raph. |
+| 14 | maneuver | Sim | "Have raph approach the person in white from the left while donnie passes around the right of the rack of boxes before approaching the same person from the other side" | Raph's final approach vector reaches the person from their left; Donnie's path passes around the right side of the rack and his final approach reaches the person from their right. Both robots end within 1 grid point of the person in white. |
+| 15 | maneuver | Sim | "Have one robot move along the north edge of the map to the person in purple while the other robot travels along the south edge until it is directly south of the same person, then move north to the person" | Robot A stays within 1 grid point of the north edge for its entire traverse until reaching the person. Robot B stays within 1 grid point of the south edge until it is directly south of the person (same column ±1 grid point), then moves north. Both robots end within 1 grid point of the person in purple. |
+| 16 | maneuver | AVL 1 | "Have the robots switch places. Have raph move around the south of the chair and have Donnie move around the north of the chair." | Each robot ends within 1 grid point of the other robot's starting position. Raph's path passes to the south of the chair; Donnie's path passes to the north of the chair. |
+| 17 | maneuver | AVL 2 | "Send both robots to the person. Have one approach around the north of the boxes, and one approach around the south of the boxes." | Both robots end within 1 grid point of the person. One robot's path passes around the north side of the boxes; the other's passes around the south side. |
+| 18 | maneuver | AVL 3 | "Have Donnie circle around the box on the left and then go to the chair." | Donnie completes a full loop around the left box, then ends within 1 grid point of the chair. |
 
 ## License
 
