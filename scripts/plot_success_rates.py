@@ -78,8 +78,11 @@ def main():
 
     plt.rcParams.update({
         "font.family": "serif",
-        "font.serif": ["DejaVu Serif"],
-        "font.size": 12,
+        # Times New Roman only, with no fallback: if it is missing, matplotlib prints a
+        # "findfont: Font family ... not found" warning instead of quietly using a look-alike.
+        # Ubuntu: sudo apt install ttf-mscorefonts-installer, then rm -rf ~/.cache/matplotlib
+        "font.serif": ["Times New Roman"],
+        "font.size": 13,
         "axes.linewidth": 0.8,
         "axes.edgecolor": "#333333",
     })
@@ -135,16 +138,16 @@ def main():
     # the data can use the full plot height instead of reserving 18% of it as header room.
     for cat, (lo, hi) in CATEGORY_SPANS.items():
         ax.text((lo + hi) / 2, HEADER_Y, cat, ha="center", va="bottom",
-                fontsize=11, color="black", clip_on=False)
-    ax.text(mean_x, HEADER_Y, "Mean", ha="center", va="bottom", fontsize=11, color="black",
+                fontsize=12, color="black", clip_on=False)
+    ax.text(mean_x, HEADER_Y, "Mean", ha="center", va="bottom", fontsize=12, color="black",
             clip_on=False)
 
     ax.set_xticks(list(prompts) + [mean_x])
-    ax.set_xticklabels([str(p) for p in prompts] + ["all"], fontsize=10)
+    ax.set_xticklabels([str(p) for p in prompts] + ["all"], fontsize=11)
     # "Prompt" as a left-aligned text at the shared row rather than set_xlabel, which can only
     # centre. va="top" hangs it from the same line the legend hangs from, so the two align.
     ax.text(0.0, -LABEL_ROW_IN / AXES_H, "Prompt", transform=ax.transAxes,
-            ha="left", va="top", fontsize=12)
+            ha="left", va="top", fontsize=13)
     ax.set_ylabel("Success rate (%)")
     # Only just above the 100% lanes: the headers live outside the axes now, so no headroom is
     # needed for them.
@@ -165,7 +168,7 @@ def main():
     # Proxy handles: the drawn bars come in pairs (lane + value), so an automatic legend would
     # collect both; full-opacity patches give one clean swatch per method.
     ax.legend(handles=[Patch(facecolor=METHOD_COLORS[n], label=n) for n in methods],
-              loc="upper center", ncol=n_methods, frameon=False, fontsize=11, borderpad=0,
+              loc="upper center", ncol=n_methods, frameon=False, fontsize=12, borderpad=0,
               bbox_to_anchor=(0.55, -LABEL_ROW_IN / AXES_H))
 
     # No tight_layout: the legend is a child of the axes, so tight_layout treats it as content
