@@ -3,7 +3,7 @@
 # do not exist on PyPI, so listing them makes `pip install -r` fail outright. See package.xml.
 
 python-dotenv
-openai-2.41.1
+openai==2.41.1
 transforms3d>=0.4.2   # tf_transformations needs it, but pulls it from pip rather than ROS
 
 # CLIPSeg traversability segmentation (obs_seg)

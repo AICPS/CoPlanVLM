@@ -28,7 +28,7 @@ cot=True the operator's instruction (piece 4) precedes the chain-of-thought scaf
 coming last.
 
 exec.py sends the image as the user turn's only content. The standalone baseline harnesses
-(test_regression_only / test_convoi_prompting / test_battleship_baseline) instead send
+(test_pixel_selection / test_convoi_prompting / test_grid_overlay) instead send
 ``[input_text(operator instruction), input_image]``, so there the instruction appears twice — once in
 the system prompt and once as user text. Those scripts do not use this module's prompts, but the
 difference is worth knowing when comparing conditions.
@@ -655,7 +655,7 @@ Respond with EXACTLY one JSON object and nothing else:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ABLATION: no-red-marker condition (scripts/test_pipeline_no_markers.py)
+# ABLATION: no-red-marker condition (scripts/ablation_test_no_obs_markers.py)
 # ══════════════════════════════════════════════════════════════════════════════
 # A second prompt condition for measuring how much the red-X obstacle marks actually help. The
 # overlay carries ONLY blue dots (map_gen.render_grid_points_map) and no text anywhere mentions red

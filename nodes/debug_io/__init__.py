@@ -287,7 +287,7 @@ def save_robot_paths(out_path: str, img_bgr: np.ndarray, world_paths: dict, came
     Each path uses the SAME per-robot color as its overlay marker: a hollow circle at the start,
     a staggered DASHED polyline through the waypoints, a filled dot at the end, plus a legend.
 
-    Retained for test_battleship_baseline's robot_paths_centroids.png, which renders the
+    Retained for test_grid_overlay's robot_paths_centroids.png, which renders the
     reference route through the chosen cell centroids (pre-A*). The general combined figure is
     save_paths_with_waypoints.
     """

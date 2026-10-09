@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
-"""test_convoi_prompting.py — CoNVOI-style numbered free-space marking (single VLM call, no CoT).
+"""test_pixel_selection.py — coordinate-pointing path baseline (single VLM call, no CoT).
 
-The fourth marking condition in the study. Where test_pipeline marks EVERY grid cell (blue dot if
-free, red X if blocked, alphanumeric label on both) and test_grid_overlay lays a labeled grid
-over the whole image, this condition marks the image ONLY where the robot can actually drive, with
-plain sequential numbers:
+The opposite extreme from test_pipeline's set-of-marks + chain-of-thought pipeline: the VLM sees an
+UNMARKED overhead image (no grid, no set-of-marks — only a hollow circle + name label per robot so it can
+tell raph from donnie) and returns, for each robot, an ordered list of KEY POINTS as coordinates [x, y].
+Those points are mapped to world coordinates and fed to the astar_proj planner, which projects each to
+the nearest free cell and routes A* between them. No classifier, no chain-of-thought.
 
-  * candidate points are the same 14x8 cell centres every other condition uses;
-  * a candidate that is not FREE in the INFLATED planning grid gets nothing drawn — a hole in the
-    pattern, no red marker, no label;
-  * a candidate that IS free gets the next integer, walking the grid in raster order (top-left,
-    across to the right, then the left end of the next row down).
-
-So the numbering runs 1..N with no gaps while the spatial layout has gaps. A number's VALUE therefore
-carries no information about where it is — that is the point of the condition, and it is why the
-prompt describes the marks without ever describing how the numbers are laid out. The occupancy map
-does the obstacle reasoning; the VLM only does the semantic selection ("which of these drivable spots
-gets me to the chair").
-
-The VLM returns, for each robot, an ordered list of those numbers. They are looked up to pixels and
-fed through astar_proj.build_reference — the SAME call the set-of-marks harnesses make for their
-maneuver / nav2point label sequences — then planned with astar_proj. No classifier, no
-chain-of-thought, and no adjacency constraint on the sequence (unlike the battleship baseline).
+COORDINATES ARE NORMALIZED, not raw pixels. The VLM answers on a 0-GRID_MAX grid spanning the image
+(x = 0 at the left edge, GRID_MAX at the right; y = 0 at the top, GRID_MAX at the bottom) and this script
+converts back with _from_grid. Two reasons, both about measuring pointing rather than arithmetic:
+  * for vision the image is rescaled so its short side is 768 px, so a 1936x1216 frame reaches the model
+    as roughly 1223x768 — asking for coordinates in the original resolution makes it silently rescale;
+  * sim (1936x1216) and real (1920x1200) frames would otherwise need different coordinate spaces for the
+    same physical scene. Normalized, one prompt is correct for both.
+The robots' TRUE normalized positions are given in the prompt as calibration anchors (_anchor_lines) —
+they are the only points in the image whose location is known exactly.
 
 Reuses the same segmentation/occupancy, goal separation, planner (node_Path_Translator.astar_proj) and
-debug writers as test_pipeline / test_pixel_selection (imported), so the only differences are the
-overlay, the custom single-call prompt, and the label scheme.
+debug writers as test_pipeline / test_grid_overlay (imported), so the only differences are the
+unmarked overlay, the custom single-call prompt, and using the VLM's own coordinates (not grid-cell
+centroids) as reference points.
 
     --mode sim   the Gazebo overhead image  (test_data/overhead.png + poses.json, gazebo calibration)
     --mode real  an AVL_* lab image         (--scene, hardcoded poses, lab_test calibration)
@@ -35,17 +30,17 @@ Prerequisites:
     source install/setup.bash
 
 Usage (from workspace root):
-    python3 src/CoPlanVLM/scripts/test_convoi_prompting.py --mode sim \\
+    python3 src/CoPlanVLM/scripts/test_pixel_selection.py --mode sim \\
         --prompt "Send raph to the chair and donnie to the box"
 
-    python3 src/CoPlanVLM/scripts/test_convoi_prompting.py --mode real --scene AVL_3 \\
+    python3 src/CoPlanVLM/scripts/test_pixel_selection.py --mode real --scene AVL_3 \\
         --prompt "Send raph to the chair and donnie to the box"
 
-Output (written to --out, default debug/convoi_{sim,real}/):
-    marks_overlay.png     — the numbered free-space image sent to the VLM
-    robot_paths_waypoints.png — both robots' planned (A*) trajectories + their chosen numbers
+Output (written to --out, default debug/pixel_selection_{sim,real}/):
+    marks_overlay.png     — the unmarked image (robot markers only) sent to the VLM
+    robot_paths_waypoints.png — both robots' planned (A*) trajectories + their numbered pixel picks
     raw_overhead.png, inflation_overlay.png — identical for every robot, so written once here
-  and per robot in <out>/<robot>/: vlm_selections, route_centroids, route_planned.
+  and per robot in <out>/<robot>/: vlm_selections (numbered points), route_centroids, route_planned.
 """
 from __future__ import annotations
 
@@ -58,17 +53,17 @@ import os
 import sys
 
 import cv2
-from PIL import Image as PILImage, ImageDraw, ImageFont
+from PIL import Image as PILImage, ImageDraw
 
 import debug_io
-from coord_transform import gazebo_to_world, gazebo_to_ned, ned_to_world, world_to_ned
+from coord_transform import (gazebo_to_world, gazebo_to_ned, ned_to_world, world_to_ned,
+                             pixel_to_world, world_to_pixel)
 from obs_seg.segmenter import segment_frame
 from obs_seg.occupancy import (mask_to_occupancy, create_filtered_occupancy_map,
                                render_inflation_overlay, RESOLUTION as _RESOLUTION)
 from node_Path_Translator import astar_proj
 from node_Path_Translator.astar_proj import PARAMS as ASTAR_PARAMS
 from node_Executive_API import map_gen
-from node_Executive_API.map_gen import _N_COLS, _N_ROWS
 
 # Reuse test_pipeline's helpers (OpenAI client, JSON parse, goal separation, evaluation printer) to
 # avoid drift, and test_pipeline_real's SCENES so real-mode images/poses have exactly one definition.
@@ -78,46 +73,15 @@ import test_pipeline_real as tpr   # noqa: E402
 
 # Per-mode defaults, same shape as ablation_test_no_obs_markers._OUT_DIRS. sim and real write to separate
 # directories so one mode's results can never clobber the other's.
-_OUT_DIRS = {"sim": "debug/convoi_sim", "real": "debug/convoi_real"}
+_OUT_DIRS = {"sim": "debug/pixel_selection_sim", "real": "debug/pixel_selection_real"}
 _CAMERAS  = {"sim": "gazebo", "real": "lab_test"}
 
-# ── Number mark appearance ─────────────────────────────────────────────────────
-# Yellow, RGB. Drawn as bare text centred on the point — no dot, no X, no backing box, unlike every
-# other renderer in map_gen (which gray-backs its labels). The absence of a marker glyph is part of
-# the condition: the number IS the mark.
-# A pale yellow rather than a saturated one: raising the blue channel off 0 lifts the glyphs away from
-# the warm yellow-brown of the lab carpet and the yellow floor tape (which a saturated yellow blends
-# into), while staying unmistakably yellow — the prompt tells the model to look for yellow numbers.
-_NUM_COLOR = (255, 243, 150)
-
-# Point size of the numbers. THIS is the knob to turn to make the marks bigger or smaller.
-# Deliberately a local font rather than map_gen._LABEL_FONT (28 pt): that one is shared by the
-# battleship grid labels, the set-of-marks labels and the robot name labels, so raising it there
-# would silently change what the OTHER conditions in the study look like. Larger than 28 because
-# these numbers carry no dot to draw the eye — and because the model sees the image rescaled to a
-# 768 px short side, which shrinks every glyph by roughly 0.63x on the way in.
-_NUM_SIZE = 38
-# BOLD (DejaVuSans-Bold, not the regular face map_gen loads): with no dot or backing box behind them,
-# the numbers rely entirely on stroke weight to stay readable over carpet speckle and shadow, and the
-# heavier stroke survives the downscale to the model's 768 px short side far better than a thin one.
-# Falls back to the regular face, then to PIL's bitmap default, so a machine without DejaVu still runs.
-try:
-    _NUM_FONT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                                   size=_NUM_SIZE)
-except OSError:
-    try:
-        _NUM_FONT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                                       size=_NUM_SIZE)
-    except OSError:
-        _NUM_FONT = ImageFont.load_default()
+# Normalized coordinate range the VLM answers in: [0, GRID_MAX] on BOTH axes, spanning the image.
+GRID_MAX = 1000
 
 
 # ── Prompt (our own; no chain-of-thought) ───────────────────────────────────────
-# Deliberately silent on how the numbers are laid out. They are assigned in raster order over the
-# free cells only, so consecutive numbers are usually — but NOT always — neighbours, and the gaps
-# left by obstacles mean a number's value cannot be turned into a position. Telling the model any
-# rule here would be telling it a rule that is wrong wherever an obstacle intervenes.
-CONVOI_PROMPT = """\
+REGRESSION_PROMPT = """\
 You are a path-planning agent controlling two TurtleBot4 robots named "raph" and "donnie" that share one
 workspace. You are given an overhead camera image of the environment. There is a small hollow circle drawn on each robot with its name next to it:
 - "raph"   — the round black TurtleBot marked with a magenta circle labeled "raph".
@@ -127,102 +91,135 @@ All directions are from the IMAGE's point of view, NOT a robot's or person's per
 of an object means its left/right side as it appears in the image, and up/down mean toward the top/bottom
 of the image. Cardinal directions are fixed to the image: NORTH/UP is toward the top, SOUTH/DOWN toward
 the bottom, WEST/LEFT toward the left edge, EAST/RIGHT toward the right edge.
+The robots must avoid all obstacles while moving.
 
-THE NUMBERS ON THE IMAGE:
-The image is marked with yellow numbers. Each number sits at a location a robot can safely drive to —
-every numbered spot is on clear, open floor. Anywhere with NO number is either an obstacle or too close
-to one to be safe, so the empty regions of the image show you where the robots cannot go.
-The numbers are NAMES, NOT COORDINATES: a number's value tells you nothing about where it is, and two
-numbers that are close in value are not necessarily close together in the image. Judge every number
-only by WHERE YOU SEE IT in the image.
+COORDINATE SYSTEM:
+Give every point as [x, y] on a NORMALIZED grid that does not depend on the image's pixel size:
+  x = 0 at the LEFT edge, x = {gmax} at the RIGHT edge
+  y = 0 at the TOP edge,  y = {gmax} at the BOTTOM edge
+So [{ghalf}, {ghalf}] is the exact centre of the image, [0, 0] the top-left corner, [{gmax}, {gmax}] the
+bottom-right corner, and [{ghalf}, 0] the middle of the top edge. Both numbers must be INTEGERS between
+0 and {gmax}. Never report pixel coordinates and never give a value outside 0-{gmax}.
+
+KNOWN POSITIONS — the robots' true coordinates on that grid. Use them to calibrate every estimate:
+{anchors}
+Judge every other point by comparing it to these: something halfway between the robots is halfway between
+their coordinates, something further right than "raph" has a larger x, something above "donnie" has a
+smaller y.
 
 YOUR TASK:
-For each robot, choose an ordered list of NUMBERS the robot must drive to in order to accomplish the
-operator's instruction, in travel order. Use ONLY numbers that actually appear in the image — never
-invent a number you cannot see. Do NOT include a number for the robot's own current position — the
-route already starts there; list only where it must GO.
-Give as FEW numbers as the task needs: if the robot can reach its destination on a clear straight run,
-ONE number — the one nearest the destination — is the correct answer. Add intermediate numbers only
-where they are needed to steer around something, remembering that the robot drives in a straight line
-between consecutive numbers, so no straight segment may cut through an object, furniture, a wall or the
-other robot. You MUST include both robots; if a robot has no task, give it an empty list.
-For tasks requiring the robots to survey or patrol a region, please generate routes that completely cover
-the designated area. If no robot name or number of robots is mentioned, please try to divide the work 
-evenly and efficiently between robots.
-
+For each robot, choose an ordered list of KEY POINTS the robot must travel to in order to accomplish the
+operator's instruction, in travel order. Do NOT repeat the robot's own current position — the route
+already starts there; list only where it must GO. Give as FEW points as the task needs: if the robot can
+reach its destination on a clear straight run, ONE point — the destination — is the correct answer. Add
+intermediate points only where they are needed to steer around something. Try to AVOID traveling into
+obstacles: look at the image and keep every point on clear, open floor, and remember the robot drives in
+a straight line between consecutive points, so no straight segment may cut through an object, furniture,
+a wall or the other robot. You MUST include both robots; if a robot has no task, give it an empty list.
 
 Respond with EXACTLY one JSON object and nothing else:
-{"waypoints": {"raph": [<number>, ...], "donnie": [<number>, ...]}}
+{{"waypoints": {{"raph": [[x, y], ...], "donnie": [[x, y], ...]}}}}
 
-Example — for a DIFFERENT image than this one, where the chair is next to the number 44 and there is a
-clear run to it from raph, while donnie must get to a box next to the number 61 on the far side of a
-table, the instruction "Send raph to the chair and donnie to the box" gives:
-{"waypoints": {"raph": [44], "donnie": [23, 39, 61]}}
-(raph gets one number, the destination, because no detour is needed. donnie gets three: 23 and 39 are
-numbers on open floor that carry it around the WEST end of the table, then 61 is the destination. Note
-that donnie's numbers are not consecutive and not in any particular numeric order — they were chosen by
-where they appear in the image, which is the only thing that matters.)"""
+Example 1 — a simple "go there" task. For a DIFFERENT image than this one, where raph is at [180, 620]
+and donnie at [640, 210], the chair is at [520, 430], the box is at [950, 500], and both robots have open
+floor in front of them, the instruction "Send raph to the chair and donnie to the box" gives:
+{{"waypoints": {{"raph": [[520, 430]], "donnie": [[950, 500]]}}}}
+(one point each — just the destination. No detour is needed, so no extra points are invented.)
 
-
-# ── Numbered free points (the marking scheme) ────────────────────────────────────
-
-def _numbered_free_points(w: int, h: int, occ_grid, occ_meta,
-                          camera: str) -> tuple[dict[str, tuple[float, float]], int]:
-    """Assign 1..N to the FREE 14x8 cell centres in raster order. Returns ({label: (u, v)}, n_blocked).
-
-    Candidate geometry matches render_battleship_map / grid_cell_centers.csv — the image divided into
-    _N_COLS x _N_ROWS equal cells, centre at ((col+0.5)*cell_w, (row+0.5)*cell_h) — but derived from
-    the LOADED image's w/h rather than read from the CSV, which is hardcoded for the 1936x1216 sim
-    frame and would be a few pixels off on the 1920x1200 lab frames.
-
-    Free/blocked comes from map_gen._cell_is_free against the INFLATED planning grid: the identical
-    classification behind the red X marks and blocked_cell_labels, so a spot that carries a number can
-    never be a spot the planner then refuses to route through.
-
-    Raster order is row-major: the top row left-to-right, then the next row down, and so on. Blocked
-    candidates are SKIPPED without consuming a number, so the returned labels are exactly "1".."N"
-    with no gaps while the drawn pattern has holes wherever an obstacle is. That is what makes the
-    number a pure name: its value cannot be inverted back to a position.
-
-    Keys are strings because astar_proj.build_reference does a `label in grid_px` lookup and the
-    debug_io writers key their pixel dicts the same way.
-    """
-    cw, ch = w / _N_COLS, h / _N_ROWS
-    points: dict[str, tuple[float, float]] = {}
-    n_blocked = 0
-    n = 0
-    for row in range(_N_ROWS):
-        for col in range(_N_COLS):
-            u, v = (col + 0.5) * cw, (row + 0.5) * ch
-            if not map_gen._cell_is_free(u, v, occ_grid, occ_meta, camera):
-                n_blocked += 1
-                continue
-            n += 1
-            points[str(n)] = (u, v)
-    return points, n_blocked
+Example 2 — For another scene donnie is at [640, 210], the chair is at [640, 820],
+and a large table covers the middle of the image around [640, 500], directly between them. Driving
+straight down would cut through the table, so the route steps around its WEST side before turning back to
+the chair. The instruction "Send donnie to the chair" gives:
+{{"waypoints": {{"raph": [], "donnie": [[380, 320], [380, 720], [640, 820]]}}}}
+(three points: two to clear the table on the west, then the destination. Every straight segment between
+consecutive points — [640,210]->[380,320], [380,320]->[380,720], [380,720]->[640,820] — stays on open
+floor. raph has no task, so it gets an empty list.)"""
 
 
-def _render_numbered_map(pil_rgba: PILImage.Image, grid_px: dict, robot_poses_ned: dict,
-                         camera: str) -> PILImage.Image:
-    """Draw each number centred on its point in yellow, plus the robot circles + name labels.
+# ── Unmarked overlay (robot name markers only) ──────────────────────────────────
 
-    No dot, no X and no backing box: the number itself is the only thing drawn at the point (PIL's
-    anchor="mm" centres the glyphs on the coordinate rather than hanging them off its top-left). The
-    robot markers stay because the VLM still has to tell raph from donnie; their name labels are given
-    the numbers' bounding boxes as `occupied` so _draw_robot_markers' collision search moves a name
-    off any number it would otherwise cover.
-    """
+def _render_robots_only(pil_rgba: PILImage.Image, robot_poses_ned: dict,
+                        camera: str) -> PILImage.Image:
+    """The 'unmarked' image: a copy of the overhead image with ONLY the robot circles + name labels
+    (no grid, no set-of-marks), so the VLM can identify raph vs donnie while pointing on bare floor."""
     result = pil_rgba.copy()
     draw = ImageDraw.Draw(result)
-    occupied: list[tuple] = []
-    for label, (u, v) in grid_px.items():
-        draw.text((u, v), label, fill=_NUM_COLOR, font=_NUM_FONT, anchor="mm")
-        occupied.append(draw.textbbox((u, v), label, font=_NUM_FONT, anchor="mm"))
-    # Robot names keep map_gen's shared _LABEL_FONT so the identification channel looks identical to
-    # every other condition; only the numbers scale with _NUM_SIZE.
-    map_gen._draw_robot_markers(draw, robot_poses_ned, camera, map_gen._LABEL_FONT,
-                                occupied=occupied)
+    map_gen._draw_robot_markers(draw, robot_poses_ned, camera, map_gen._LABEL_FONT)
     return result
+
+
+# ── Normalized grid <-> pixels ───────────────────────────────────────────────────
+
+def _to_grid(u: float, v: float, w: int, h: int) -> tuple[int, int]:
+    """Pixel (u, v) -> normalized integer grid coords, the space the VLM answers in.
+
+    Each axis is normalized by its OWN extent, so one grid unit is w/GRID_MAX px horizontally and
+    h/GRID_MAX px vertically — the grid is not square in metres on a non-square image. That is
+    deliberate: it is what makes one prompt correct for both the 1936x1216 sim frame and the 1920x1200
+    lab frames, and the model is only ever told about edges, never about aspect ratio.
+    """
+    return int(round(u / w * GRID_MAX)), int(round(v / h * GRID_MAX))
+
+
+def _from_grid(gx: float, gy: float, w: int, h: int) -> tuple[float, float]:
+    """Normalized grid coords -> pixel (u, v). Inverse of _to_grid, up to integer rounding."""
+    return gx / GRID_MAX * w, gy / GRID_MAX * h
+
+
+def _anchor_lines(robot_world_xy: dict, w: int, h: int, camera: str) -> str:
+    """The robots' TRUE positions, expressed on the same normalized grid the VLM must answer in.
+
+    These are the only points in the image whose location is known exactly, so they are the only honest
+    calibration references available — every other point the model must judge relative to them. Robots
+    are listed in a fixed order (raph, donnie, then any others) so the prompt is reproducible, and a
+    robot with no pose simply contributes no line.
+    """
+    colors = {"raph": "magenta circle", "donnie": "light-blue circle"}
+    order = [n for n in ("raph", "donnie") if n in robot_world_xy]
+    order += [n for n in robot_world_xy if n not in order]
+    lines = []
+    for name in order:
+        gx, gy = _to_grid(*world_to_pixel(*robot_world_xy[name], camera=camera), w, h)
+        marker = f" ({colors[name]})" if name in colors else ""
+        lines.append(f'- "{name}"{marker} is at [{gx}, {gy}].')
+    return "\n".join(lines)
+
+
+# ── Normalized points -> world reference route (replaces astar_proj.build_reference) ──
+
+def _points_to_reference(points: list, pose_xy, w: int, h: int,
+                         camera: str) -> tuple[list, list, list, int]:
+    """Convert the VLM's ordered normalized points to a world-frame reference route.
+
+    ref = [robot pose] + [pixel_to_world(_from_grid(gx, gy)) for each valid point]. Returns
+    (ref, pixels, dropped, n_clamped) where:
+        pixels    the same points in PIXEL coordinates, so the debug figures plot exactly what was
+                  planned instead of re-deriving the conversion (and silently plotting normalized
+                  numbers as pixels, which would pile every marker into the top-left corner);
+        dropped   entries that are not 2-number pairs — warned about, not fatal;
+        n_clamped how many coordinates fell outside [0, GRID_MAX] and were pulled back to the edge.
+                  Clamping rather than dropping keeps one bad number from silently shortening a route
+                  (which would flatter the path-length comparison); the count is reported as a metric
+                  of whether the model understood the coordinate space at all.
+    """
+    ref = [(float(pose_xy[0]), float(pose_xy[1]))]
+    pixels: list[tuple[float, float]] = []
+    dropped: list = []
+    n_clamped = 0
+    for p in points:
+        try:
+            gx, gy = float(p[0]), float(p[1])
+        except (TypeError, ValueError, IndexError):
+            dropped.append(p)
+            continue
+        cgx, cgy = min(max(gx, 0.0), GRID_MAX), min(max(gy, 0.0), GRID_MAX)
+        if (cgx, cgy) != (gx, gy):
+            n_clamped += 1
+        u, v = _from_grid(cgx, cgy, w, h)
+        x, y = pixel_to_world(u, v, camera=camera)
+        pixels.append((u, v))
+        ref.append((float(x), float(y)))
+    return ref, pixels, dropped, n_clamped
 
 
 # ── Reply schema (structured outputs) ────────────────────────────────────────────
@@ -230,61 +227,68 @@ def _render_numbered_map(pil_rgba: PILImage.Image, grid_px: dict, robot_poses_ne
 def _waypoints_schema(robot_names) -> dict:
     """Strict JSON Schema for the reply, enforced by the Responses API via constrained decoding.
 
-    Shape: {"waypoints": {<robot>: [<int>, ...] for every robot}} — a flat list of integers, since
-    this condition's labels are single numbers rather than the regression baseline's [x, y] pairs.
+    Shape: {"waypoints": {<robot>: [[x, y], ...] for every robot}}.
 
-    Without this the model is free to return something that LOOKS like JSON but is not (the observed
-    failure elsewhere in the study was a ```json fence around entries carrying // comments), which
-    aborts the run after CLIPSeg has already segmented and the image has already been paid for.
-    additionalProperties:false plus a fixed robot roster also means the model cannot invent a third
-    key or drop a robot.
+    Without this the model is free to return something that LOOKS like JSON but is not — the observed
+    failure was a ```json fence wrapping entries annotated with trailing comments:
 
-    Deliberately NOT an enum of the valid numbers. prompt_gen.route_schema supports constraining
-    waypoints to free-cell labels, but the study leaves that off, and turning it on here would make
-    "Invalid picks (no such number)" identically zero — destroying the one metric that measures
-    whether the model actually read the marks.
+        "raph": [
+            [150, 950],  // Green box
+        ]
+
+    which json.loads rejects, aborting the run after CLIPSeg has already segmented and the image has
+    already been paid for. additionalProperties:false plus a fixed robot roster also means the model
+    cannot invent a third key or drop a robot. This is the same mechanism test_pipeline uses
+    (prompt_gen.route_schema); the baseline simply never adopted it.
+
+    Strict mode does not support minItems/maxItems, so a point is typed "array of integer" rather than
+    "exactly two integers" — _points_to_reference still drops any entry that is not a 2-number pair.
     """
+    point = {"type": "array", "items": {"type": "integer"}}
     return {
         "type": "object", "additionalProperties": False, "required": ["waypoints"],
         "properties": {
             "waypoints": {
                 "type": "object", "additionalProperties": False,
                 "required": list(robot_names),
-                "properties": {name: {"type": "array", "items": {"type": "integer"}}
-                               for name in robot_names},
+                "properties": {name: {"type": "array", "items": point} for name in robot_names},
             },
         },
     }
 
 
-# ── VLM call (single call; text + numbered image; schema-enforced JSON) ──
+# ── VLM call (single call; text + unmarked image; schema-enforced JSON) ──
 
-def _call_convoi_vlm(prompt: str, map_b64: str, model: str, temperature: float,
-                     robot_names, out_dir: str | None = None) -> tuple[dict, dict]:
-    """system instructions = CONVOI_PROMPT, user content = [operator prompt text, numbered overlay
-    image]. Reply shape is enforced by _waypoints_schema (structured outputs), so a fenced or
-    comment-annotated reply cannot be produced in the first place.
+def _call_regression_vlm(prompt: str, map_b64: str, anchors: str, model: str,
+                         temperature: float, robot_names, out_dir: str | None = None
+                         ) -> tuple[dict, dict]:
+    """system instructions = REGRESSION_PROMPT (anchors filled in), user content = [operator prompt
+    text, unmarked overlay image]. Reply shape is enforced by _waypoints_schema (structured outputs),
+    so a fenced or comment-annotated reply cannot be produced in the first place.
 
     `map_b64` is the base64 PNG of the overlay, encoded by the caller so the same bytes go to both
-    the API and debug_io.save_marks_overlay. The image is sent with image_url alone — no `detail` —
-    matching exec.py and every other harness, so the condition differs from them only in the prompt
-    and the overlay.
+    the API and debug_io.save_marks_overlay. `anchors` is the _anchor_lines block. The image is sent
+    with image_url alone — no `detail` — matching exec.py and every other harness, so the condition
+    differs from them only in the prompt and the overlay.
 
-    Returns (routes, usage) where routes = {robot: [<number>, ...]} and usage is token counts.
+    Returns (routes, usage) where routes = {robot: [[x, y], ...]} NORMALIZED points and usage is
+    token counts.
     """
+    instructions = REGRESSION_PROMPT.format(gmax=GRID_MAX, ghalf=GRID_MAX // 2, anchors=anchors)
+
     print("─" * 16 + " VLM full prompt (system instructions) " + "─" * 16)
-    print(CONVOI_PROMPT)
+    print(instructions)
     print(f'\nOperator instruction: "{prompt}"')
     print("─" * 71)
     # This baseline sends the operator text as a separate user turn, so record it with the system
     # instructions to keep vlm_prompt.txt a complete picture of what the model was given.
-    saved_prompt = CONVOI_PROMPT + f'\n\nOperator instruction: "{prompt}"'
+    saved_prompt = instructions + f'\n\nOperator instruction: "{prompt}"'
 
     client = tp._openai_client()
     print(f"Structured output: enforcing schema (robots: {list(robot_names)})")
     print(f"Planning with {model}…")
     response = client.responses.create(
-        model=model, temperature=temperature, instructions=CONVOI_PROMPT,
+        model=model, temperature=temperature, instructions=instructions,
         input=[{
             "role": "user",
             "content": [
@@ -314,9 +318,10 @@ def _call_convoi_vlm(prompt: str, map_b64: str, model: str, temperature: float,
     if not isinstance(routes, dict):
         routes = result if any(k in result for k in ("raph", "donnie")) else {}
     print("─" * 16 + " VLM routes " + "─" * 16)
-    for name, nums in routes.items():
-        n = len(nums) if isinstance(nums, list) else "?"
-        seq = ", ".join(map(str, nums)) if nums else "(empty — holds position)"
+    for name, points in routes.items():
+        n = len(points) if isinstance(points, list) else "?"
+        seq = ", ".join(f"[{p[0]},{p[1]}]" for p in points if isinstance(p, (list, tuple)) and len(p) >= 2) \
+            if points else "(empty — holds position)"
         print(f"  {name} ({n}): {seq}")
     print("─" * 44)
     return routes, usage
@@ -378,9 +383,9 @@ def main() -> None:
         sys.exit(f"Failed to read image: {img_path}")
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil_rgba = PILImage.fromarray(img_rgb).convert("RGBA")
-    # w and h come from the LOADED image and are threaded into _numbered_free_points, so the marks
-    # land on cell centres for the 1936x1216 sim frame and the 1920x1200 lab frames alike. Never
-    # replace these with a constant or with grid_cell_centers.csv.
+    # w and h come from the LOADED image and are threaded into every _to_grid/_from_grid call, so the
+    # same prompt is correct for the 1936x1216 sim frame and the 1920x1200 lab frames alike. Never
+    # replace these with a constant.
     h, w = img_bgr.shape[:2]
 
     if mode == "sim":
@@ -420,16 +425,8 @@ def main() -> None:
     debug_io.save_raw_overhead(args.out, img_bgr)
     debug_io.save_inflation_overlay(args.out, infl_overlay)
 
-    # ── Numbered free-space overlay ───────────────────────────────────────
-    # Built AFTER segmentation (unlike the other baselines' overlays), because which points get a
-    # number is decided by the inflated grid this stage produces.
-    grid_px, n_blocked = _numbered_free_points(w, h, infl, meta, camera)
-    n_total = _N_COLS * _N_ROWS
-    print(f"Numbered {len(grid_px)} free points (1-{len(grid_px)}); "
-          f"{n_blocked} of {n_total} candidates blocked and left unmarked.")
-    if not grid_px:
-        sys.exit("No free grid points to mark — nothing the VLM could select. Check segmentation.")
-    overlay = _render_numbered_map(pil_rgba, grid_px, robot_poses_ned, camera)
+    # ── Unmarked overlay (robot name markers only) ────────────────────────
+    overlay = _render_robots_only(pil_rgba, robot_poses_ned, camera)
     # Encode once: the same bytes go to the API and to marks_overlay.png.
     _buf = io.BytesIO()
     overlay.save(_buf, format="PNG")
@@ -437,8 +434,11 @@ def main() -> None:
     debug_io.save_marks_overlay(args.out, map_b64)
 
     # ── Single VLM call ───────────────────────────────────────────────────
-    routes, usage = _call_convoi_vlm(args.prompt, map_b64, args.model, args.temperature,
-                                     list(robot_world_xy), out_dir=args.out)
+    # The anchors are computed from the SAME robot_world_xy the planner uses, so what the model is
+    # told is exactly where the robots are — a wrong anchor would be worse than no anchor.
+    anchors = _anchor_lines(robot_world_xy, w, h, camera)
+    routes, usage = _call_regression_vlm(args.prompt, map_b64, anchors, args.model, args.temperature,
+                                         list(robot_world_xy), out_dir=args.out)
 
     params = dict(ASTAR_PARAMS)
 
@@ -448,23 +448,28 @@ def main() -> None:
     # it two robots sent to one target both terminate on the same cell. A robot holding position still
     # occupies its cell, so it is claimed BEFORE the loop: claiming inside would be too late if it
     # happened to be visited second, and reserving up front makes the outcome independent of `routes`
-    # key order. "Will not move" covers an empty number list, a malformed route, and a robot with no
+    # key order. "Will not move" covers an empty point list, a malformed route, and a robot with no
     # pose.
     claimed: list = []
-    for name, nums in routes.items():
-        if isinstance(nums, list) and nums and name in robot_world_xy:
+    for name, points in routes.items():
+        if isinstance(points, list) and points and name in robot_world_xy:
             continue                                  # moving; its goal is claimed after it plans
         pose = robot_world_xy.get(name)
         if pose is not None:
             claimed.append(pose)
 
-    # ── Plan per robot through the VLM's numbered picks (astar) ───────────
+    # ── Plan per robot through the VLM's coordinate picks (astar) ─────────
     path_lengths: dict[str, float] = {}
     world_paths: dict[str, list] = {}
-    sel_routes: dict[str, list] = {}   # per robot, the labels that actually resolved to a point
-    total_invalid = 0
-    for name, nums in routes.items():
-        if not isinstance(nums, list):
+    total_clamped = 0
+    # Accumulated selections for the combined figure. This baseline's "labels" are just ordinals,
+    # so they are numbered CONTINUOUSLY across robots (raph 1..n, donnie n+1..m) — per-robot
+    # restarts would collide in the shared label->pixel dict and mis-place donnie's markers.
+    sel_routes: dict[str, list] = {}
+    sel_px: dict[str, tuple] = {}
+    next_id = 1
+    for name, points in routes.items():
+        if not isinstance(points, list):
             print(f"[{name}] route is not a list; skipping.", file=sys.stderr)
             continue
         if name not in robot_world_xy:
@@ -472,19 +477,12 @@ def main() -> None:
             continue
 
         pose_xy = robot_world_xy[name]
-        # The schema types picks as integers while grid_px is keyed by string, so normalise here.
-        # str(int(n)) also collapses a stray 12.0 onto "12" rather than losing the pick.
-        labels = []
-        for n in nums:
-            try:
-                labels.append(str(int(n)))
-            except (TypeError, ValueError):
-                labels.append(str(n))
-        ref, unknown = astar_proj.build_reference(labels, pose_xy, grid_px, camera=camera)
-        for lbl in unknown:
-            print(f"[{name}] no such number '{lbl}' on the image; skipping.")
-        total_invalid += len(unknown)
-        labels = [lbl for lbl in labels if lbl not in unknown]
+        ref, pixels, dropped, n_clamped = _points_to_reference(points, pose_xy, w, h, camera)
+        for p in dropped:
+            print(f"[{name}] malformed point '{p}'; skipping.")
+        if n_clamped:
+            total_clamped += n_clamped
+            print(f"[{name}] {n_clamped} coordinate(s) outside 0-{GRID_MAX}; clamped to the image edge.")
 
         if len(ref) < 2:
             print(f"[{name}] fewer than 2 reference points after filtering; skipping.")
@@ -506,8 +504,6 @@ def main() -> None:
                       f"robot: ({ref[-1][0]:.2f}, {ref[-1][1]:.2f}) -> "
                       f"({adjusted[0]:.2f}, {adjusted[1]:.2f})")
                 ref[-1] = adjusted
-
-        sel_routes[name] = labels
 
         print(f"[{name}] Planning with astar ({len(ref)} reference pts)…")
         world_path, dbg = astar_proj.plan(ref, ctx, meta, params)
@@ -531,8 +527,14 @@ def main() -> None:
 
         out_dir = os.path.join(args.out, name)
         os.makedirs(out_dir, exist_ok=True)
-        # "points" style: the chosen numbers plotted at their own pixel positions. grid_px is the
-        # WHOLE numbering (labels are globally unique), so one dict serves every robot.
+        # Reuse save_vlm_selections' point style: ordinal labels + a pixel dict keyed by them. The
+        # pixels come from _points_to_reference, NOT from the raw reply — the reply is normalized, so
+        # plotting it directly would pile every marker into the top-left corner of the image.
+        labels = [str(next_id + i) for i in range(len(pixels))]
+        grid_px = {lbl: px for lbl, px in zip(labels, pixels)}
+        next_id += len(pixels)
+        sel_routes[name] = labels
+        sel_px.update(grid_px)
         debug_io.save_vlm_selections(out_dir, img_bgr, "points", labels, grid_px)
         dbg["start_world"] = pose_xy
         astar_proj.save_debug(out_dir, img_bgr, cleared, meta, ctx, dbg, params, camera=camera,
@@ -542,19 +544,19 @@ def main() -> None:
     # ── Combined trajectory plot ──────────────────────────────────────────
     if world_paths:
         wp_png = os.path.join(args.out, "robot_paths_waypoints.png")
-        debug_io.save_paths_with_waypoints(wp_png, img_bgr, world_paths, sel_routes, grid_px, camera)
-        print(f"Combined robot paths + VLM numbers -> {wp_png}")
+        debug_io.save_paths_with_waypoints(wp_png, img_bgr, world_paths, sel_routes, sel_px, camera)
+        print(f"Combined robot paths + VLM points -> {wp_png}")
 
     # ── Evaluation summary ────────────────────────────────────────────────
     print("─" * 27 + " Evaluation " + "─" * 27)
     print(f"Scene: {args.scene if mode == 'real' else 'sim'} ({os.path.basename(img_path)})")
-    print("Baseline: convoi-style numbered free space + astar (no classifier, no CoT)")
+    print(f"Baseline: unmarked image + normalized 0-{GRID_MAX} coordinates + astar "
+          "(no classifier, no CoT)")
     print(f"Tokens: {usage['total']} total "
           f"({usage['input']} input + {usage['output']} output)")
-    print(f"Numbered free points: {len(grid_px)} ({n_blocked} of {n_total} blocked, not marked)")
-    # How often the model named a number that is not on the image — the direct measure of whether it
-    # read the marks at all, and the counterpart to the regression baseline's clamped-pick count.
-    print(f"Invalid picks (no such number): {total_invalid}")
+    # How often the model answered outside the stated coordinate space — the direct measure of
+    # whether it understood the grid, and the metric to compare against the old pixel prompt.
+    print(f"Out-of-range picks (clamped): {total_clamped}")
     tp._print_path_lengths(path_lengths)
     print("─" * 66)
 

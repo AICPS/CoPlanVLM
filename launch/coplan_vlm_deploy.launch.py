@@ -139,14 +139,6 @@ def generate_launch_description():
         ]
     )
 
-    # joy_node disabled for now — only the (now-removed) audio push-to-talk node consumed /joy,
-    # and the unconditional joy_node was leaking orphaned processes.
-    # joy_node = Node(
-    #     package='joy',
-    #     executable='joy_node',
-    #     name='joy_node'
-    # )
-
     # Path visualizer node
     path_visualizer_node = Node(
         package='coplan_vlm',
@@ -188,6 +180,5 @@ def generate_launch_description():
         control_node,
         control_node_2,
         path_translator_node,
-        # joy_node,   # disabled — see commented joy_node definition above
         path_visualizer_node,
     ])

@@ -17,10 +17,17 @@ IGNITION_DELAY=${IGNITION_DELAY:-15} # seconds to wait for the world + raph to c
 # Must match the sim/bridges or nothing shares the ROS graph.
 export ROS_LOCALHOST_ONLY=1
 
-source /opt/ros/humble/setup.bash
-source ~/projects/turtle4_ws/install/setup.bash
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# scripts/ -> src/CoPlanVLM -> src -> workspace root. Derived rather than hardcoded so the script
+# works from whatever the workspace is called; override with COPLAN_WS=/path/to/ws if it differs.
+COPLAN_WS="${COPLAN_WS:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
+
+source /opt/ros/humble/setup.bash
+if [[ ! -f "${COPLAN_WS}/install/setup.bash" ]]; then
+  echo "No build found at ${COPLAN_WS}/install/setup.bash — run 'colcon build --symlink-install' from the workspace root first." >&2
+  exit 1
+fi
+source "${COPLAN_WS}/install/setup.bash"
 
 # Kill anything left over from a previous run so we start from a clean slate. Order matters:
 # kill the orchestrator/respawner (spawn_second_robot.sh) FIRST, otherwise it relaunches

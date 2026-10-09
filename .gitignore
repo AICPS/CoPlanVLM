@@ -15,9 +15,13 @@ log/
 # Generated debug artifacts (occupancy maps, segmentation overlays, planned routes)
 debug/
 
+# Generated figures / test caches
+success_rates.png
+.pytest_cache/
+
 # Secrets — do NOT commit API keys
-# config/.env
-# .env
+config/.env
+.env
 
 # Editor / OS cruft
 .vscode/

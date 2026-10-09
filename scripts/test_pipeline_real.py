@@ -61,8 +61,7 @@ import test_pipeline as tp   # noqa: E402
 # The AVL_* poses were read off the images through coord_transform.pixel_to_world with the lab_test
 # calibration, so they are accurate to roughly a cell (~0.05 m); refine them if a run's robot marker
 # does not sit on the robot in marks_overlay.png. Robot IDENTITY is a guess in AVL_1/2/3 (the
-# easternmost robot is called raph, matching AVL_4) — swap the two tuples if it is backwards.
-# AVL_4's poses are the originals this harness shipped with and are known good.
+# easternmost robot is assumed to be raph) — swap the two tuples if it is backwards.
 #
 # raph is listed first in every dict so it gets _ROBOT_COLORS[0] (magenta) and donnie [1] (cyan),
 # matching the rest of the pipeline.
@@ -78,10 +77,6 @@ SCENES = {
     "AVL_3": {                                          # chair E, boxes; robots centre-east
         "image": "AVL_3.png",
         "poses": {"raph": (2.01, -0.56), "donnie": (0.41, -0.85)},
-    },
-    "AVL_4": {                                          # person on the floor, boxes E and NW
-        "image": "AVL_4.png",                           # (formerly overhead_real.png)
-        "poses": {"raph": (3.20, -1.45), "donnie": (-3.55, -1.35)},
     },
 }
 
@@ -106,8 +101,9 @@ def main() -> None:
     parser.add_argument("--scene", choices=list(SCENES), default=SCENE,
                         help=f"Image + hardcoded robot poses to run on (default: {SCENE}, set by the "
                              "SCENE constant at the top of this file)")
-    parser.add_argument("--data", default="test_data",
-                        help="Dir containing the scene images (default: test_data)")
+    parser.add_argument("--data", default=str(tp.DATA_DIR),
+                        help="Dir containing the scene images (default: the test_data/ bundled "
+                             "with the package)")
     parser.add_argument("--camera", default="lab_test", choices=["gazebo", "lab_test"],
                         help="Overhead camera calibration for pixel<->world (default: lab_test)")
     parser.add_argument("--out", default="debug/offline_test_real",

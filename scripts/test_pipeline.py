@@ -88,6 +88,11 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _PKG_DIR = _SCRIPT_DIR.parent
 _CONFIG_DIR = _PKG_DIR / "config"
 
+# The fixture ships with the package, so the harnesses run straight after a clone with no sim and
+# no capture step. Resolved from this file rather than the CWD so they work from any directory;
+# the sibling harnesses import this as tp.DATA_DIR. Override per run with --data.
+DATA_DIR = _PKG_DIR / "test_data"
+
 
 def _load_grid_csv(csv_path: Path) -> dict[str, tuple[float, float]]:
     """Returns {label: (u, v)} pixel dict from grid_cell_centers.csv."""
@@ -250,8 +255,8 @@ def _print_path_lengths(path_lengths: dict) -> None:
 
     A FIXED order, not dict order: path_lengths is filled in `routes` key order — whatever order the
     VLM happened to emit — so the same two robots would swap places between runs and make two runs
-    awkward to compare side by side. Every harness (test_pipeline, _real, _battleship_baseline,
-    _regression_only) calls this one function so their evaluation blocks stay directly comparable.
+    awkward to compare side by side. Every harness (test_pipeline, _real, _grid_overlay,
+    _pixel_selection) calls this one function so their evaluation blocks stay directly comparable.
     """
     if not path_lengths:
         print("Path length: no paths were planned.")
@@ -274,8 +279,9 @@ def main() -> None:
                              "marked_obs for every controller.")
     parser.add_argument("--prompt", required=True,
                         help="Operator instruction for the VLM (required in every mode)")
-    parser.add_argument("--data", default="test_data",
-                        help="Dir containing overhead.png + poses.json (default: test_data)")
+    parser.add_argument("--data", default=str(DATA_DIR),
+                        help="Dir containing overhead.png + poses.json (default: the test_data/ "
+                             "bundled with the package)")
     parser.add_argument("--camera", default="gazebo", choices=["gazebo", "lab_test"],
                         help="Overhead camera calibration for pixel<->world (default: gazebo)")
     parser.add_argument("--out", default="debug/offline_test_sim",

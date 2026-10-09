@@ -1,6 +1,6 @@
 # CoPlanVLM – VLM‑Powered Multi‑Robot Mission Planning
 
-> **ROS 2 workspace that turns a natural‑language instruction into coordinated motion for two TurtleBot 4s — in Ignition Gazebo Fortress or in the REEF Autonomous Vehile Laboratory.**
+> **ROS 2 workspace that turns a natural‑language instruction into coordinated motion for two TurtleBot 4s — in Ignition Gazebo Fortress or in the REEF Autonomous Vehicle Laboratory.**
 
 ## Table of Contents
 
@@ -9,15 +9,14 @@
 3. [Project Architecture](#project-architecture)
 4. [Node Reference](#node-reference)
 5. [Topics & Interfaces](#topics--interfaces)
-6. [Safety Filter (CBF‑QP)](#safety-filter-cbfqp)
-7. [Prerequisites](#prerequisites)
-8. [Workspace Setup](#workspace-setup)
-9. [Configuration](#configuration)
-10. [Running in Simulation](#running-in-simulation)
-11. [Running in the Lab](#running-in-the-lab)
-12. [Testing & Debugging](#testing--debugging)
-13. [Test Prompts and Success Criteria](#Test-Prompts-And-Success-Criteria)
-14. [License](#license)
+6. [Prerequisites](#prerequisites)
+7. [Workspace Setup](#workspace-setup)
+8. [Configuration](#configuration)
+9. [Running in Simulation](#running-in-simulation)
+10. [Running in the Lab](#running-in-the-lab)
+11. [Testing & Debugging](#testing--debugging)
+12. [Test Prompts and Success Criteria](#test-prompts-and-success-criteria)
+13. [License](#license)
 
 ---
 
@@ -82,7 +81,7 @@ operator sentence
      TurtleBot 4             TurtleBot 4
 ```
 
-Each `node_Control` runs a [CBF‑QP safety filter](#safety-filter-cbfqp) on its own output, using the
+Each `node_Control` runs a CBF‑QP safety filter on its own output, using the
 other robot's pose and the shared occupancy grid — so collisions are avoided even when the plan
 itself is stale.
 
@@ -101,7 +100,7 @@ figure shows the same instant the VLM saw.
 | --- | --- | --- |
 | `node_Executive_API` | `node_Executive_API.exec` | Classifier + planner LLM calls, CLIPSeg, publishes `/vlm_plan` |
 | `node_Path_Translator` | `node_Path_Translator.translator_node` | Cell labels → metric waypoints via A* / coverage controllers|
-| `node_Control` | `node_Control.control` | Path follower + [CBF‑QP safety filter](#safety-filter-cbfqp) → `/cmd_vel`. **One instance per robot** |
+| `node_Control` | `node_Control.control` | Path follower + CBF‑QP safety filter → `/cmd_vel`. **One instance per robot** |
 | `node_Path_Visualizer` | `node_Path_Visualizer.path_visualizer` | Live overlay of plans + poses |
 | `node_Odometry_To_Pose` | `node_Odometry_To_Pose.odom_to_pose` | **Sim only.** Gazebo odom → NED pose. **One per robot** |
 | `obs_seg_cli` | `obs_seg.cli` | Standalone segmentation / occupancy CLI |
@@ -134,118 +133,6 @@ instances that handle both robots via their `robot_names` parameter.
 
 ---
 
-<!-- ## Safety Filter (CBF‑QP)
-
-The VLM plan is obstacle‑aware only at planning time. Anything that happens afterwards — the other
-robot crossing the path, tracking error, a stale plan — is unmodelled. `node_Control` therefore runs
-a **decentralised Control‑Barrier‑Function QP** between the nominal P controller and the `/cmd_vel`
-publisher. Each robot runs its own, using only its own pose, the other robot's pose, and the shared
-occupancy grid.
-
-```
-nominal P controller → [v, ω] → clamp → CBF‑QP filter → safe [v, ω] → /cmd_vel
-```
-
-The nominal controller is **not** modified. With no constraint active the filter returns the nominal
-command byte‑identical (it short‑circuits rather than solving a trivial QP).
-
-### Method
-
-Because `[v, ω]` cannot move a differential‑drive robot sideways, the barrier is enforced on a
-**look‑ahead point** ℓ metres ahead, whose velocity is a full‑rank function of the command:
-
-```
-p_ℓ  = [x + ℓcosθ, y + ℓsinθ]        G(θ) = [[cosθ, −ℓsinθ],      ṗ_ℓ = G(θ)u
-                                             [sinθ,  ℓcosθ]]
-```
-
-For each obstacle/peer centre `p_k`, with `Δp = p_ℓ − p_k`:
-
-```
-h_k = |Δp|² − R_k²          ḣ_k = 2Δpᵀ G(θ) u          ZCBF:  ḣ_k ≥ −γ_k h_k
-QP row:  −2Δpᵀ G(θ) u  ≤  max(γ_k h_k, 0)                       (A u ≤ b)
-```
-
-and the filter solves, subject to those rows and the actuator box:
-
-```
-u* = argmin ½(u − u_nom)ᵀ W (u − u_nom),     W = diag(4, 1)
-```
-
-**Why the `max(…, 0)` clamp.** Without it, a robot starting inside the unsafe set (`h < 0`) faces a
-row demanding `ḣ > 0` — "actively move away" — which is infeasible with an obstacle dead ahead and
-no reverse, since the `ω` coefficient is then exactly zero. The QP would fail, the fallback would
-stop the robot, and stopping never restores `h`: a permanent freeze. The clamp degrades a violated
-row to "do not get worse", which `u = 0` always satisfies. Consequently **the QP is feasible
-unconditionally**, no slack variables are needed, and the robot escapes by rotating until forward
-motion is permitted again.
-
-**Inflation convention.** Map obstacles are read from the `infl` layer of
-`debug/coplan_vlm_occupancy.npz` — the same pre‑inflated grid A\* plans on, already dilated by
-`INFLATION_RADIUS` (0.45 m). The filter therefore adds only a margin and does **not** re‑add the
-robot radius; using the planner's own grid also means the filter never fights a correctly‑tracked
-path. The peer arrives as a raw pose, so it needs the full footprint plus ℓ, because the barrier
-protects the look‑ahead point while the body extends behind it:
-
-```
-R_obstacle = obstacle_safety_margin
-R_robot    = ℓ + radius_self + radius_other + robot_robot_safety_margin
-```
-
-**Fallback.** On solver failure, a non‑finite result, or a post‑solve check of `A u ≤ b + ε` failing,
-the filter publishes **zero linear and angular velocity** and increments a failure counter. It never
-falls back to the unfiltered nominal command.
-
-**Cost.** The QP is only solved on ticks where the nominal command actually violates a row — when it
-is already feasible it *is* the optimum, so it is returned unchanged without invoking the solver.
-Measured against a real occupancy snapshot (20 496 blocked cells): the filter runs in **0.6 ms mean,
-2.1 ms worst** against the 100 ms control period, with 0 solver fallbacks in 1500 poses. -->
-
-<!-- ### Parameters
-
-All on `node_Control`; the launch files set `robot_name` / `robot_names` per instance.
-
-**Defaults are not listed here.** Every filter knob is defined once, in `CBFConfig`
-([`nodes/node_Control/cbf_filter.py`](nodes/node_Control/cbf_filter.py)), next to the maths that
-justifies its value; `control.py` seeds each parameter declaration from that dataclass. Read the
-current defaults there, or from a running node with `ros2 param get`. A table of numbers here would
-be a third copy, and third copies go stale.
-
-| Parameter | Meaning |
-| --- | --- |
-| `enable_safety_filter` | `false` bypasses the filter entirely (`safety_filter:=false`) |
-| `robot_name` | which robot this instance drives — **must** be in `robot_names` |
-| `robot_names` | roster; peers are derived as roster‑minus‑self |
-| `lookahead_distance` | ℓ, metres |
-| `cbf_gamma_robot` / `cbf_gamma_obstacle` | ZCBF gains (γ·dt ≪ 1 at 10 Hz) |
-| `robot_radius_self` / `robot_radius_other` | TurtleBot 4 body radius |
-| `robot_robot_safety_margin` | ≥ (v_self + v_peer) × reaction latency + tracking error |
-| `obstacle_safety_margin` | added to the **already inflated** grid; must stay below `RESOLUTION/2` |
-| `obstacle_query_radius` | map obstacles beyond this are ignored |
-| `max_obstacle_constraints` | cap on map rows, nearest‑first |
-| `obstacle_downsample_resolution` | bucket size when thinning obstacle cells |
-| `solver_tolerance` | post‑solve feasibility tolerance (catches gross solver failure) |
-| `linear_velocity_min` | no reverse — blind backing is worse than stopping |
-
-The QP weights are hardcoded `W = diag(4, 1)` in `cbf_filter.py`; only their ratio matters, and it is
-set by normalising each deviation against the actuation available to it.
-
-### Limitations
-
-* The peer is treated as **stationary** within each solve. The error is bounded by its own top speed
-  and absorbed by `robot_robot_safety_margin`; re‑derive that margin if `max_linear_vel` is raised.
-* Protection **assumes both robots run the filter**. A peer with it disabled, driving at full speed,
-  cannot be avoided from one side alone.
-* **Poses are assumed fresh** — there is no staleness detection. If a pose source dies mid‑run the
-  filter keeps computing barriers from a frozen position. Verify the pose topics are live first.
-* ℓ makes `ω` a `1/ℓ` weaker lever than `v`, so the filter **brakes rather than swerves**.
-* Starting *outside* the safe set gives non‑worsening only, not a recovery guarantee.
-* It enforces safety, not progress: two robots meeting head‑on both brake and can deadlock.
-* Safety further depends on pose, map, model and timing accuracy; discrete 10 Hz updates and
-  actuator tracking error are what the conservative margins above pay for.
-
---- -->
-
 ## Prerequisites
 
 * **OS / runtime** – Ubuntu 22.04, ROS 2 Humble, Python 3.10+.
@@ -269,7 +156,11 @@ git clone https://github.com/AICPS/CoPlanVLM.git src/CoPlanVLM
 # 3. install Python deps
 python3 -m pip install -r src/CoPlanVLM/requirements.txt
 
-# 4. resolve ROS 2 deps & build — FROM THE WORKSPACE ROOT
+# 4. add your OpenAI key (see Configuration) — do this BEFORE building
+cp src/CoPlanVLM/config/.env.example src/CoPlanVLM/config/.env
+$EDITOR src/CoPlanVLM/config/.env
+
+# 5. resolve ROS 2 deps & build — FROM THE WORKSPACE ROOT
 rosdep update
 rosdep install --from-paths src --ignore-src -y
 colcon build --symlink-install
@@ -284,14 +175,19 @@ source install/setup.bash
 
 ### OpenAI credentials
 
-Both launch files load `config/.env` and read **`MY_API_KEY`**:
+Both launch files load `config/.env` and read **`MY_API_KEY`**. Copy the template and insert your
+own key:
 
 ```bash
-# src/CoPlanVLM/config/.env
-MY_API_KEY=sk-...
+cp src/CoPlanVLM/config/.env.example src/CoPlanVLM/config/.env
+$EDITOR src/CoPlanVLM/config/.env        # set MY_API_KEY=sk-...
 ```
 
-Launch fails immediately with `MY_API_KEY not found in .env file` if it is missing.
+`config/.env` is gitignored — keep your key out of version control. Launch fails immediately with
+`MY_API_KEY not found in .env file` if it is missing.
+
+> Create the file **before** `colcon build`, or re-run the build afterwards: the launch files read
+> the copy under `install/`, which the build places there.
 
 ### Camera calibration
 
@@ -328,7 +224,7 @@ Starts the Executive, Translator, Visualizer, and one Control + Odometry‑to‑
 ### 3. Send a mission
 
 ```bash
-./src/CoPlanVLM/scripts/send_prompt.sh "Send raph to the chair and donnie to the table"
+./src/CoPlanVLM/scripts/send_prompt.sh "Surround the person in the purple shirt by sending robots to the left and right sides of the person"
 ./src/CoPlanVLM/scripts/send_prompt.sh "Patrol the perimeter of the map"
 ```
 
@@ -345,8 +241,6 @@ only to translate Gazebo odometry to the NED frame.
 
 ### 1. Bring up the Mocap room
 
-ADD ANY ADDITIONAL STEPS for making both publish without errors
-
 ```bash
 ros2 launch ros_vrpn_client test.launch name:=donnie
 ```
@@ -361,6 +255,12 @@ ros2 launch ros_vrpn_client test.launch name:=raph
 ```bash
 ros2 launch ueye_cam standalone.launch.py
 ```
+
+> **Lab-only dependencies.** `ros_vrpn_client` and `ueye_cam` are site-specific packages for the
+> REEF MoCap rig and the ueye overhead camera. They are not public ROS 2 packages and are
+> deliberately **not** declared in `package.xml`, so this section is not reproducible outside the
+> lab. Everything in [Running in Simulation](#running-in-simulation) and
+> [Testing & Debugging](#testing--debugging) runs anywhere.
 
 Before launching, these four topics must be publishing:
 
@@ -382,7 +282,7 @@ ros2 launch coplan_vlm coplan_vlm_deploy.launch.py
 Starts the Executive, Translator, Visualizer, and one Control node per robot — all with
 `camera:=lab_test`.
 
-### 3. Send a mission
+### 4. Send a mission
 
 Identical to sim:
 
@@ -394,17 +294,109 @@ Identical to sim:
 
 ## Testing & Debugging
 
-### Unit tests
+### The bundled `test_data/` fixture
 
-The safety filter's maths and its closed-loop behaviour are covered by ROS-free tests — no sim, no
-API calls:
+The offline harnesses need no simulator, no robots and no capture step — the fixture ships with the
+repo at `test_data/`:
+
+| File | Scene |
+| --- | --- |
+| `overhead.png` + `poses.json` | the Gazebo warehouse frame used by every `--mode sim` run |
+| `AVL_1.png`, `AVL_2.png`, `AVL_3.png` | the three lab scenes used by `--mode real` / `test_pipeline_real.py` |
+
+Every harness resolves this directory from its own location, so the commands below work from any
+working directory. Pass `--data <dir>` to point at a different capture.
+
+To regenerate the sim fixture against a different scene, run this once with the simulator up:
 
 ```bash
-source install/setup.bash
-python3 -m pytest src/CoPlanVLM/test/ -v
+python3 src/CoPlanVLM/scripts/save_overhead.py \
+  --out src/CoPlanVLM/test_data --robots raph donnie
 ```
 
+> The lab scenes' robot **identities** are inferred, not measured: `test_pipeline_real.py` assumes
+> the easternmost robot is `raph`. If a run's markers look swapped, swap the two pose tuples in
+> `SCENES` at the top of that file.
+
+### Offline harnesses
+
+These run the full planning pipeline on a saved image. **Each run spends OpenAI API credits.**
+
+| Script | Purpose |
+| --- | --- |
+| `scripts/test_pipeline.py` | The reference pipeline on the sim overhead image |
+| `scripts/test_pipeline_real.py` | Same, on a lab image with `lab_test` calibration |
+
+```bash
+# sim scene — test_data/overhead.png (gazebo calibration)
+python3 src/CoPlanVLM/scripts/test_pipeline.py \
+  --prompt "Surround the person in the purple shirt by sending robots to the left and right sides of the person"
+
+# lab scene — test_data/AVL_2.png (lab_test calibration)
+python3 src/CoPlanVLM/scripts/test_pipeline_real.py --scene AVL_2 \
+  --prompt "Move one robot to the north of the boxes and one to the south of the boxes."
+```
+
+`test_pipeline_real.py` takes `--scene AVL_1`, `AVL_2` or `AVL_3`; it defaults to `AVL_3`. Each
+scene carries its own hardcoded robot poses, so the scene and the prompt have to match — the boxes
+above exist in `AVL_2`. See [Test Prompts and Success Criteria](#test-prompts-and-success-criteria)
+for a prompt that has been validated against each scene.
+
+### Ablations
+
+Three configurations isolate the contribution of each component. Only the obstacle-marking arm
+needs its own script; the other two are flags on the reference harness.
+
+| Configuration | Command |
+| --- | --- |
+| CoPlanVLM (full) | `test_pipeline.py --prompt "…"` |
+| CoPlanVLM w/o Marked Obs. | `ablation_test_no_obs_markers.py --mode sim --prompt "…"` |
+| CoPlanVLM Maneuver Only | `test_pipeline.py --planner maneuver --out debug/ablation_maneuver_only_sim --prompt "…"` |
+| CoPlanVLM w/o CoT | `test_pipeline.py --no-cot --out debug/ablation_no_cot_sim --prompt "…"` |
+
+Each arm takes `--mode real` (for the wrapper) or `test_pipeline_real.py --scene AVL_1|AVL_2|AVL_3`
+to run the same configuration on the lab scenes.
+
+**How each one works:**
+
+* **w/o Marked Obs.** needs a dedicated script because the red-X cue reaches the model through
+  *four* channels: the rendered image, the overlay description, the impassable-label listing, and
+  the per-step descriptions in the reply JSON schema. The wrapper swaps in `generate_prompt_nomark`
+  and `route_schema_nomark`, which strip all four. `--map-overlay points` removes only the first
+  three and leaves the red-marker wording in the schema — it is a **half-ablation and not the
+  ablation arm**.
+* **Maneuver Only** sets the controller directly, so the classifier call is skipped entirely rather
+  than overridden.
+* **w/o CoT** drops both the chain-of-thought scaffold from the prompt and the per-step reasoning
+  fields from the reply schema, so the model's first generated tokens are the waypoints.
+
+> **Pass `--out` for the last two.** The no-markers wrapper forces its own output directory, but
+> `--planner maneuver` and `--no-cot` default to `debug/offline_test_sim` — the same directory as
+> the full pipeline — and will otherwise overwrite the baseline's artifacts.
+
+> **Ablations are offline-only.** The live `node_Executive_API` hardcodes the production overlay
+> and chain-of-thought, and exposes no parameter for either, so these configurations cannot be run
+> through the launch files.
+
+### Baselines
+
+Three alternative marking schemes, each a single VLM call with no classifier and no
+chain-of-thought:
+
+| Baseline | Command |
+| --- | --- |
+| Grid Overlay | `test_grid_overlay.py --mode sim --prompt "…"` |
+| Pixel Selection | `test_pixel_selection.py --mode sim --prompt "…"` |
+| CoNVOI Marking | `test_convoi_prompting.py --mode sim --prompt "…"` |
+
+`scripts/plot_success_rates.py` regenerates the comparison figure. Its `SUCCESS_RATES` table is
+entered by hand — there is no automated path from harness output into the chart.
+
 ### Debug artifacts
+
+Every run writes its prompt, the exact image the VLM saw, the occupancy overlay and the planned
+routes to `debug/` at the workspace root — run the offline harnesses from there so their output
+lands alongside the live runs'.
 
 Each run writes to its own directory under `debug/`, so runs never overwrite each other:
 
@@ -412,8 +404,11 @@ Each run writes to its own directory under `debug/`, so runs never overwrite eac
 | --- | --- |
 | `debug/gazebo_sim` | live sim run |
 | `debug/deploy_real` | live lab run |
-| `debug/offline_test_sim` | `test_pipeline.py` |
-| `debug/offline_test_real` | `test_pipeline_real.py` |
+| `debug/offline_test_sim` / `debug/offline_test_real` | `test_pipeline.py` / `test_pipeline_real.py` |
+| `debug/ablation_no_obs_markers_{sim,real}` | `ablation_test_no_obs_markers.py` |
+| `debug/grid_overlay_{sim,real}` | `test_grid_overlay.py` |
+| `debug/pixel_selection_{sim,real}` | `test_pixel_selection.py` |
+| `debug/convoi_{sim,real}` | `test_convoi_prompting.py` |
 
 Each contains:
 
@@ -427,24 +422,6 @@ Each contains:
 | `<robot>/` | per‑robot `vlm_selections.png`, `route_centroids.png`, `route_planned.png` |
 
 Every figure in a directory shows the same camera frame, so they can be compared directly.
-
-### Offline harnesses
-
-These run the full planning pipeline on a saved image — no sim, no robots. **Each run spends
-OpenAI API credits.**
-
-| Script | Purpose |
-| --- | --- |
-| `scripts/test_pipeline.py` | The reference pipeline on a sim overhead image |
-| `scripts/test_pipeline_real.py` | Same, on a real lab image with `lab_test` calibration |
-
-```bash
-python3 src/CoPlanVLM/scripts/test_pipeline.py \
-  --prompt "Send raph to the chair and donnie to the table"
-```
-
-`scripts/test_map_gen.py` renders overlays with **no** API calls — useful for checking the image
-before spending a request.
 
 ---
 

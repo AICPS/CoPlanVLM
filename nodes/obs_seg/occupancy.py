@@ -270,7 +270,7 @@ def render_inflation_overlay(base_bgr: np.ndarray, occ: np.ndarray, infl: np.nda
     """Return a BGR debug overlay of the occupancy drawn on the overhead photo.
 
     Single source of truth for the inflation overlay, shared by astar_proj.save_debug (hence the live
-    Path Translator node and test_pipeline) and test_map_gen. Two translucent layers:
+    Path Translator node and the offline harnesses). Two translucent layers:
         red    — cells blocked in `occ`. Pass the post-override, pre-inflation grid (the `cleared`
                  grid from create_filtered_occupancy_map) so this layer shows the true obstacles fed
                  to inflation and NOT regions that were cleared to free before inflating.
