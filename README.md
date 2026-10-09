@@ -1,4 +1,4 @@
-# CoPlanVLM – VLM‑Powered Multi‑Robot Mission Planning
+# CoPlanVLM: Coordinated Path Planning for a Robot Team using Vision Language Models
 
 > **ROS 2 workspace that turns a natural‑language instruction into coordinated motion for two TurtleBot 4s — in Ignition Gazebo Fortress or in the REEF Autonomous Vehicle Laboratory.**
 
