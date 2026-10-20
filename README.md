@@ -1,6 +1,6 @@
 
 
-https://github.com/user-attachments/assets/04743431-c193-4dae-ae46-591284bcdfb9
+<video src="https://github.com/user-attachments/assets/04743431-c193-4dae-ae46-591284bcdfb9" width="400" controls></video>
 
 # CoPlanVLM: Coordinated Path Planning for a Robot Team using Vision Language Models
 
