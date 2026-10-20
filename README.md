@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/04743431-c193-4dae-ae46-591284bcdfb9
+
 # CoPlanVLM: Coordinated Path Planning for a Robot Team using Vision Language Models
 
 > **ROS 2 workspace that turns a natural‑language instruction into coordinated motion for two TurtleBot 4s — in Ignition Gazebo Fortress or in the REEF Autonomous Vehicle Laboratory.**
