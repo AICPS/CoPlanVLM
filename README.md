@@ -12,7 +12,7 @@
 <table>
   <tr>
     <td align="center">
-      <a href="https://youtu.be/qF7L1T8tQlM">
+      <a href="https://youtu.be/mg-sMeeIxuY">
         <img src="https://img.youtube.com/vi/mg-sMeeIxuY/maxresdefault.jpg" width="400" alt="Lab deployment video">
       </a>
       <br><b>Lab Deployment</b>
