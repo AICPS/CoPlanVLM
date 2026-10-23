@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/2610.14341"><img src="https://img.shields.io/badge/arXiv-2610.14341-b31b1b.svg?logo=arxiv" alt="arXiv"></a>
-  <a href="https://youtu.be/qF7L1T8tQlM"><img src="https://img.shields.io/badge/Video-Lab%20Deployment-red?logo=youtube" alt="Lab deployment video"></a>
+  <a href="https://youtu.be/mg-sMeeIxuY"><img src="https://img.shields.io/badge/Video-Lab%20Deployment-red?logo=youtube" alt="Lab deployment video"></a>
   <a href="https://youtu.be/po5BEn2nTE4"><img src="https://img.shields.io/badge/Video-Simulation-red?logo=youtube" alt="Simulation video"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
 </p>
@@ -13,7 +13,7 @@
   <tr>
     <td align="center">
       <a href="https://youtu.be/qF7L1T8tQlM">
-        <img src="https://img.youtube.com/vi/qF7L1T8tQlM/maxresdefault.jpg" width="400" alt="Lab deployment video">
+        <img src="https://img.youtube.com/vi/mg-sMeeIxuY/maxresdefault.jpg" width="400" alt="Lab deployment video">
       </a>
       <br><b>Lab Deployment</b>
     </td>
